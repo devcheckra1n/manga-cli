@@ -1,0 +1,21 @@
+{
+  "name": "manga-cli",
+  "version": "0.1.0",
+  "description": "A fast, lightweight terminal manga reader for atsu.moe — ani-cli energy, prettier.",
+  "type": "module",
+  "module": "src/index.ts",
+  "bin": {
+    "manga-cli": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run src/index.ts",
+    "build": "bun build --compile --minify src/index.ts --outfile dist/manga-cli",
+    "install:bin": "bun build --compile --minify src/index.ts --outfile $HOME/.bun/bin/manga-cli",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
