@@ -3,19 +3,35 @@
 
 import { ApiError } from "./api/client.ts";
 import { searchManga, browseByFilter } from "./api/search.ts";
-import { getMangaInfo, getDiscovery, getFilters, type DiscoveryKind } from "./api/manga.ts";
+import { getMangaInfo, getDiscovery, getFilters, getRelated, type DiscoveryKind } from "./api/manga.ts";
 import type { MangaInfo, MangaRef, SearchResult, DiscoveryItem, Chapter } from "./api/types.ts";
-import { loadConfig, ensureConfigFile, type Config } from "./utils/config.ts";
+import {
+  loadConfig,
+  ensureConfigFile,
+  isDownloadFormat,
+  type Config,
+  type DownloadFormat,
+} from "./utils/config.ts";
 import { loadHistory, getHistoryEntry, mostRecent, type HistoryEntry } from "./utils/history.ts";
+import {
+  downloadChapter,
+  selectChapters,
+  existingChapterStems,
+  chapterStem,
+} from "./utils/download.ts";
+import { loadFollows, addFollow, markSeen } from "./utils/follows.ts";
+import { scanLibrary, toReaderSource, type LibrarySeries } from "./utils/library.ts";
+import { computeStats } from "./utils/stats.ts";
+import { CONFIG_FILE, CACHE_DIR, HISTORY_FILE, expandTilde } from "./utils/paths.ts";
 import { banner, shouldShowBanner } from "./ui/banner.ts";
 import { c } from "./ui/colors.ts";
 import { ensureDeps } from "./ui/deps.ts";
-import { fzfPick, type PickItem } from "./ui/menu.ts";
-import { withSpinner } from "./ui/progress.ts";
+import { fzfPick, fzfPickMulti } from "./ui/menu.ts";
+import { withSpinner, Spinner } from "./ui/progress.ts";
 import { resolveProtocol, inTmux } from "./ui/protocol.ts";
 import { runReader } from "./ui/reader.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "0.3.0";
 
 // ── CLI parsing ───────────────────────────────────────────────────────────────
 
@@ -28,6 +44,13 @@ type Command =
   | "popular"
   | "latest"
   | "genre"
+  | "download"
+  | "where"
+  | "recommended"
+  | "follow"
+  | "updates"
+  | "library"
+  | "stats"
   | "help"
   | "version";
 
@@ -41,6 +64,10 @@ interface Args {
   debug: boolean;
   dual?: boolean;
   direction?: "rtl" | "ltr";
+  webtoon?: boolean;
+  format?: DownloadFormat;
+  chapters?: string;
+  out?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -98,6 +125,65 @@ function parseArgs(argv: string[]): Args {
         if (v) args.genre = v;
         break;
       }
+      case "-d":
+      case "--download": {
+        args.command = "download";
+        const v = argv[++i];
+        if (v && !v.startsWith("-")) args.query = v;
+        else if (v) i--; // it was a flag, not a query — put it back
+        break;
+      }
+      case "-f":
+      case "--format": {
+        const v = argv[++i];
+        if (v && isDownloadFormat(v)) args.format = v;
+        else if (v) console.error(c.yellow(`unknown format “${v}” — using default`));
+        break;
+      }
+      case "--chapters":
+      case "--chapter": {
+        const v = argv[++i];
+        if (v) args.chapters = v;
+        break;
+      }
+      case "--out":
+      case "--output": {
+        const v = argv[++i];
+        if (v) args.out = v;
+        break;
+      }
+      case "-r":
+      case "--recommended":
+      case "--recommend": {
+        args.command = "recommended";
+        const v = argv[++i];
+        if (v && !v.startsWith("-")) args.query = v;
+        else if (v) i--;
+        break;
+      }
+      case "--follow": {
+        args.command = "follow";
+        const v = argv[++i];
+        if (v && !v.startsWith("-")) args.query = v;
+        else if (v) i--;
+        break;
+      }
+      case "-u":
+      case "--updates":
+        args.command = "updates";
+        break;
+      case "--library":
+      case "--offline":
+        args.command = "library";
+        break;
+      case "--stats":
+        args.command = "stats";
+        break;
+      case "--webtoon":
+      case "--strip":
+      case "--longstrip":
+        args.webtoon = true;
+        break;
       case "--browser":
         args.browser = true;
         break;
@@ -132,12 +218,31 @@ function parseArgs(argv: string[]): Args {
   if (positional.length > 0) {
     const joined = positional.join(" ");
     const first = positional[0]?.toLowerCase();
+    const rest = positional.slice(1).join(" ");
     if (args.command === "genre") args.genre ??= joined;
     else if (args.command === "search") args.query ??= joined;
+    else if (args.command === "download") args.query ??= joined;
     else if (args.command === "interactive" && (first === "help" || first === "h")) {
       args.command = "help";
     } else if (args.command === "interactive" && first === "version") {
       args.command = "version";
+    } else if (args.command === "interactive" && (first === "where" || first === "paths")) {
+      args.command = "where";
+    } else if (args.command === "interactive" && (first === "download" || first === "dl")) {
+      args.command = "download";
+      if (rest) args.query = rest;
+    } else if (args.command === "interactive" && (first === "library" || first === "offline")) {
+      args.command = "library";
+    } else if (args.command === "interactive" && first === "stats") {
+      args.command = "stats";
+    } else if (args.command === "interactive" && (first === "updates" || first === "u")) {
+      args.command = "updates";
+    } else if (args.command === "interactive" && (first === "recommended" || first === "recs")) {
+      args.command = "recommended";
+      if (rest) args.query = rest;
+    } else if (args.command === "interactive" && first === "follow") {
+      args.command = "follow";
+      if (rest) args.query = rest;
     } else if (args.command === "interactive") {
       args.command = "search";
       args.query = joined;
@@ -164,7 +269,18 @@ ${b("COMMANDS / FLAGS")}
   ${k("-p, --popular")}          show popular manga
   ${k("-l, --latest")}           show latest updates
   ${k("-g, --genre")} <genre>    browse by genre
+  ${k("-r, --recommended")} [q]   "more like this" — recommendations for a title
+  ${k("    --follow")} [query]    follow a series for new-chapter updates
+  ${k("-u, --updates")}          show followed series with new chapters
+  ${k("    --library")}          browse & read your downloads offline
+  ${k("    --stats")}            your reading stats / wrapped
+  ${k("-d, --download")} <query>  download chapters (CBZ/ZIP/PDF/images)
+  ${k("-f, --format")} <fmt>      download format: cbz · zip · pdf · images
+  ${k("    --chapters")} <spec>   pick chapters non-interactively: 1-10 · 1,3,5 · all · latest
+  ${k("    --out")} <dir>         download into <dir> (overrides config)
+  ${k("    where")}              print config / cache / download paths
   ${k("    --dual")}             open in two-page (spread) mode
+  ${k("    --webtoon")}          long-strip scroll mode (auto for manhwa)
   ${k("    --single")}           force single-page mode
   ${k("    --rtl / --ltr")}      reading direction (manga is rtl, the default)
   ${k("    --browser")}          open in your web browser instead of the terminal
@@ -179,9 +295,12 @@ ${b("READER KEYS")}
   ${k("n / p")}          next / previous page
   ${k("] / [")}          next / previous chapter
   ${k("g / G")}          first / last page
+  ${k("↑ / ↓")}          scroll (in long-strip mode)
+  ${k("w")}              toggle long-strip (webtoon) scroll
   ${k("d")}              toggle dual-page spread
   ${k("m")}              toggle reading direction (rtl ⇄ ltr)
   ${k("f")}              toggle fit (whole page ⇄ fill width)
+  ${k("b")}              follow / unfollow this series
   ${k("+ / - / 0")}      zoom in / out / reset
   ${k("s")}              save current page to your downloads
   ${k("r")}              re-render (after a terminal resize)
@@ -189,11 +308,15 @@ ${b("READER KEYS")}
   ${k("? ")}             in-reader help · ${k("q / esc")} quit
 
 ${b("EXAMPLES")}
-  manga-cli berserk           ${c.dim("# search")}
-  manga-cli -t                ${c.dim("# trending")}
-  manga-cli -g action         ${c.dim("# browse a genre")}
-  manga-cli --dual one piece  ${c.dim("# two-page spreads")}
-  manga-cli -c                ${c.dim("# continue reading")}
+  manga-cli berserk                       ${c.dim("# search & read")}
+  manga-cli -t                            ${c.dim("# trending")}
+  manga-cli --dual one piece              ${c.dim("# two-page spreads")}
+  manga-cli -d berserk --chapters 1-10 -f pdf   ${c.dim("# download ch.1–10 as PDF")}
+  manga-cli -r                            ${c.dim("# recommendations from your last read")}
+  manga-cli --follow "one piece"          ${c.dim("# follow for new-chapter updates")}
+  manga-cli -u                            ${c.dim("# what got new chapters")}
+  manga-cli --library                     ${c.dim("# read your downloads offline")}
+  manga-cli --stats                       ${c.dim("# your reading wrapped")}
 
 ${b("SETTINGS")}  ${c.dim("~/.config/manga-cli/config.json")}
   ${k("readerMode")}   auto · kitty · iterm2 · chafa     ${c.dim("(image protocol)")}
@@ -201,9 +324,10 @@ ${b("SETTINGS")}  ${c.dim("~/.config/manga-cli/config.json")}
   ${k("dualPage")}     true · false                       ${c.dim("(two-page spreads)")}
   ${k("fit")}          page · width                       ${c.dim("(single-page fit)")}
   ${k("zoom")}         0.4 – 1.0                          ${c.dim("(render scale)")}
+  ${k("downloadFormat")} cbz · zip · pdf · images        ${c.dim("(default download format)")}
   ${k("prefetchPages")} number of pages to prefetch
   ${k("adult")}        include 18+ content by default
-  ${k("downloadDir")}  where saved pages go
+  ${k("downloadDir")}  where downloads & saved pages go
 
 ${b("DEPENDENCIES")}  ${c.dim("fzf + chafa")}
   macOS    ${c.dim("brew install fzf chafa")}
@@ -370,6 +494,7 @@ async function openManga(
       fit: cfg.fit,
       zoom: cfg.zoom,
       hudReserve: cfg.hudReserve,
+      webtoon: args.webtoon || info.forceStrip,
     });
     startPage = 0;
     if (result.action === "quit") return;
@@ -515,6 +640,315 @@ async function genreFlow(genreName: string, cfg: Config, args: Args): Promise<vo
   );
 }
 
+// ── download ──────────────────────────────────────────────────────────────────
+
+async function resolveManga(query: string, cfg: Config): Promise<MangaRef | null> {
+  const results = await withSpinner(`searching “${query}” …`, () =>
+    searchManga(query, { adult: cfg.adult }),
+  );
+  if (results.length === 0) {
+    console.log(c.yellow(`No results for “${query}”.`));
+    return null;
+  }
+  const items = results.map((r) => ({ label: searchLabel(r), previewUrl: r.poster, ref: r }));
+  const picked = await fzfPick(items, {
+    prompt: "manga ❯ ",
+    header: `${results.length} results — pick a title to download`,
+    preview: true,
+  });
+  if (!picked) return null;
+  return { id: picked.ref.id, title: picked.ref.title, poster: picked.ref.poster };
+}
+
+async function pickChaptersMulti(
+  ref: MangaRef,
+  info: MangaInfo,
+  cfg: Config,
+): Promise<Chapter[]> {
+  const done = await existingChapterStems(ref, cfg.downloadDir);
+  const items = info.chapters
+    .map((ch) => {
+      const mark = done.has(chapterStem(ref, ch)) ? c.green("✓ ") : "  ";
+      return { label: mark + chapterLabel(ch), ch };
+    })
+    .reverse(); // newest first
+  const picked = await fzfPickMulti(items, {
+    prompt: "chapters ❯ ",
+    header: `${info.title} — Tab to select multiple · Enter to download`,
+  });
+  return picked.map((p) => p.ch).sort((a, b) => a.index - b.index);
+}
+
+async function downloadFlow(query: string, cfg: Config, args: Args): Promise<void> {
+  let q = query.trim();
+  if (!q) {
+    q = (await prompt(c.violet("download manga ❯ "))).trim();
+    if (!q) return;
+  }
+  const ref = await resolveManga(q, cfg);
+  if (!ref) return;
+
+  const info = await withSpinner(`loading ${ref.title} …`, () => getMangaInfo(ref.id));
+  if (info.chapters.length === 0) {
+    console.log(c.yellow("No downloadable chapters for this title."));
+    return;
+  }
+  ref.title = info.title || ref.title;
+
+  let chapters: Chapter[];
+  if (args.chapters) {
+    chapters = selectChapters(args.chapters, info.chapters);
+    if (chapters.length === 0) {
+      console.log(c.yellow(`No chapters match “${args.chapters}”.`));
+      return;
+    }
+  } else {
+    chapters = await pickChaptersMulti(ref, info, cfg);
+    if (chapters.length === 0) return;
+  }
+
+  const format = args.format ?? cfg.downloadFormat;
+  const dir = args.out ? expandTilde(args.out) : cfg.downloadDir;
+  console.log(
+    c.dim(`↓ ${chapters.length} chapter(s) · ${c.bold(format)} · → ${dir}`),
+  );
+
+  let ok = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const ch of chapters) {
+    const label = `Ch.${ch.number}`;
+    const sp = new Spinner(`${label} …`).start();
+    try {
+      const res = await downloadChapter(ref, ch, {
+        format,
+        downloadDir: dir,
+        onProgress: (d, t) => sp.update(`${label}  ${c.dim(`${d}/${t}p`)}`),
+      });
+      if (res.skipped) {
+        sp.stop(c.dim(`• ${label} already downloaded`));
+        skipped++;
+      } else {
+        const warn = res.failed > 0 ? c.yellow(` (${res.failed} pages missing)`) : "";
+        sp.stop(c.green(`✓ ${label}`) + c.dim(`  ${res.pages}p → ${res.output}`) + warn);
+        ok++;
+      }
+    } catch (err) {
+      sp.stop(c.red(`✗ ${label}: ${err instanceof Error ? err.message : String(err)}`));
+      failed++;
+    }
+  }
+  console.log(
+    "\n" + c.bold(`Done`) + c.dim(` — ${ok} downloaded · ${skipped} skipped · ${failed} failed`),
+  );
+}
+
+function printWhere(cfg: Config): void {
+  const row = (k: string, v: string): string => `  ${c.cyan(k.padEnd(11))}${v}`;
+  console.log(
+    [
+      c.bold("manga-cli paths"),
+      row("config", CONFIG_FILE),
+      row("history", HISTORY_FILE),
+      row("cache", CACHE_DIR),
+      row("downloads", cfg.downloadDir),
+    ].join("\n"),
+  );
+}
+
+// ── recommendations (more like this) ──────────────────────────────────────────
+
+async function recommendedFlow(query: string, cfg: Config, args: Args): Promise<void> {
+  let seed: MangaRef | null = null;
+  if (query.trim()) {
+    seed = await resolveManga(query.trim(), cfg);
+  } else {
+    const recent = await mostRecent();
+    if (recent) seed = { id: recent.id, title: recent.title, poster: recent.coverUrl };
+    else {
+      const q = (await prompt(c.violet("recommend based on ❯ "))).trim();
+      if (!q) return;
+      seed = await resolveManga(q, cfg);
+    }
+  }
+  if (!seed) return;
+
+  let items = await withSpinner(`finding titles like ${seed.title} …`, () =>
+    getRelated(seed!.id, "mangaRecommendations", 0, cfg.adult),
+  );
+  if (items.length === 0) items = await getRelated(seed.id, "mangaSimilar", 0, cfg.adult);
+  if (items.length === 0) {
+    console.log(c.yellow(`No recommendations for ${seed.title} yet.`));
+    return;
+  }
+  const picks = items.map((it) => ({ label: discoveryLabel(it), previewUrl: it.poster, ref: it }));
+  const picked = await fzfPick(picks, {
+    prompt: "recommended ❯ ",
+    header: `like ${seed.title} · ${items.length} titles`,
+    preview: true,
+  });
+  if (!picked) return;
+  await openManga({ id: picked.ref.id, title: picked.ref.title, poster: picked.ref.poster }, cfg, args);
+}
+
+// ── follows + updates ──────────────────────────────────────────────────────────
+
+async function followFlow(query: string, cfg: Config): Promise<void> {
+  let q = query.trim();
+  if (!q) {
+    q = (await prompt(c.violet("follow manga ❯ "))).trim();
+    if (!q) return;
+  }
+  const ref = await resolveManga(q, cfg);
+  if (!ref) return;
+  const info = await withSpinner(`loading ${ref.title} …`, () => getMangaInfo(ref.id));
+  const title = info.title || ref.title;
+  await addFollow({
+    id: ref.id,
+    title,
+    coverUrl: ref.poster,
+    chapterCount: info.chapters.length,
+    followedAt: new Date().toISOString(),
+  });
+  console.log(
+    c.pink("♥ following ") +
+      c.bold(title) +
+      c.dim(`  (${info.chapters.length} chapters) — see new releases with -u`),
+  );
+}
+
+async function updatesFlow(cfg: Config, args: Args): Promise<void> {
+  const follows = await loadFollows();
+  if (follows.length === 0) {
+    console.log(c.yellow("Not following anything yet — add a series with --follow."));
+    return;
+  }
+  const checked = await withSpinner(`checking ${follows.length} followed title(s) …`, () =>
+    Promise.all(
+      follows.map(async (f) => {
+        try {
+          const info = await getMangaInfo(f.id);
+          return { f, count: info.chapters.length };
+        } catch {
+          return { f, count: f.chapterCount };
+        }
+      }),
+    ),
+  );
+  const rows = checked
+    .map(({ f, count }) => ({ f, count, delta: count - f.chapterCount }))
+    .sort((a, b) => b.delta - a.delta || a.f.title.localeCompare(b.f.title));
+
+  const items = rows.map((row) => {
+    const badge = row.delta > 0 ? c.green(`+${row.delta} new`) : c.dim("up to date");
+    return {
+      label: `${c.bold(row.f.title)}   ${badge}${c.dim(`   ${row.count} ch`)}`,
+      previewUrl: row.f.coverUrl,
+      row,
+    };
+  });
+  const fresh = rows.filter((r) => r.delta > 0).length;
+  const picked = await fzfPick(items, {
+    prompt: "updates ❯ ",
+    header: `${fresh} with new chapters · ${rows.length} followed`,
+    preview: true,
+  });
+  if (!picked) return;
+  const { f, count, delta } = picked.row;
+  const resume = delta > 0 ? { chapterIndex: Math.min(f.chapterCount, count - 1), page: 0 } : undefined;
+  await openManga({ id: f.id, title: f.title, poster: f.coverUrl }, cfg, args, resume);
+  await markSeen(f.id, count);
+}
+
+// ── offline library ────────────────────────────────────────────────────────────
+
+async function libraryFlow(cfg: Config, args: Args): Promise<void> {
+  const series = await scanLibrary(cfg.downloadDir);
+  if (series.length === 0) {
+    console.log(c.yellow(`No downloads in ${cfg.downloadDir} yet — grab some with -d.`));
+    return;
+  }
+  const items = series.map((s) => ({
+    label: `${c.bold(s.title)}${c.dim(`   ${s.chapters.length} chapter(s)`)}`,
+    s,
+  }));
+  const picked = await fzfPick(items, {
+    prompt: "library ❯ ",
+    header: `${series.length} downloaded series · offline`,
+  });
+  if (!picked) return;
+  await readLocal(picked.s, cfg, args);
+}
+
+async function readLocal(series: LibrarySeries, cfg: Config, args: Args): Promise<void> {
+  const { info, loadChapter } = toReaderSource(series);
+  const protocol = resolveProtocol(cfg.readerMode);
+  warnTmux(protocol);
+  while (true) {
+    const picked = await pickChapter(info);
+    if (picked === null) return;
+    const result = await runReader({
+      manga: { id: info.id, title: info.title },
+      info,
+      startChapterIndex: picked,
+      startPage: 0,
+      protocol,
+      prefetch: cfg.prefetchPages,
+      downloadDir: cfg.downloadDir,
+      direction: cfg.direction,
+      dualPage: cfg.dualPage,
+      fit: cfg.fit,
+      zoom: cfg.zoom,
+      hudReserve: cfg.hudReserve,
+      webtoon: args.webtoon ?? false,
+      noFollow: true,
+      loadChapter,
+    });
+    if (result.action === "quit") return;
+  }
+}
+
+// ── reading stats ──────────────────────────────────────────────────────────────
+
+function bar(value: number, max: number, width: number, color: (s: string) => string): string {
+  const n = max > 0 ? Math.round((value / max) * width) : 0;
+  return color("█".repeat(n)) + c.dim("░".repeat(Math.max(0, width - n)));
+}
+
+async function statsFlow(): Promise<void> {
+  const history = await loadHistory();
+  if (history.length === 0) {
+    console.log(c.yellow("No reading history yet — read something first."));
+    return;
+  }
+  const s = computeStats(history);
+  const out: string[] = [c.bold("reading stats"), c.dim("─────────────")];
+  out.push(
+    `  ${c.cyan(String(s.titles))} titles · ${c.cyan(String(s.chaptersProgressed))} chapters in · ${c.green(String(s.finished))} finished · ${c.dim(`${s.inProgress} ongoing`)}`,
+  );
+  out.push(
+    `  active ${c.cyan(String(s.activeDays))} days · 🔥 ${c.bold(String(s.currentStreak))}-day streak ${c.dim(`(longest ${s.longestStreak})`)}`,
+  );
+  if (s.since) out.push(c.dim(`  since ${new Date(s.since).toLocaleDateString()}`));
+
+  if (s.topTitles.length > 0) {
+    out.push("", "  most read");
+    const maxCh = Math.max(1, ...s.topTitles.map((t) => t.chapters));
+    for (const t of s.topTitles) {
+      const name = (t.title.length > 22 ? t.title.slice(0, 21) + "…" : t.title).padEnd(22);
+      out.push(`   ${c.bold(name)} ${bar(t.chapters, maxCh, 14, c.violet)} ${c.dim(`${t.chapters}/${t.total}`)}`);
+    }
+  }
+
+  out.push("", "  by weekday");
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const maxW = Math.max(1, ...s.weekday);
+  for (let i = 0; i < 7; i++) {
+    out.push(`   ${days[i]} ${bar(s.weekday[i], maxW, 16, c.cyan)} ${c.dim(String(s.weekday[i]))}`);
+  }
+  console.log(out.join("\n"));
+}
+
 // ── entrypoint ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -529,6 +963,9 @@ async function main(): Promise<void> {
   if (args.adult) cfg.adult = true;
   if (args.dual !== undefined) cfg.dualPage = args.dual;
   if (args.direction) cfg.direction = args.direction;
+
+  if (args.command === "where") return printWhere(cfg);
+  if (args.command === "stats") return statsFlow();
 
   await ensureDeps(["fzf", "chafa"]);
 
@@ -553,6 +990,16 @@ async function main(): Promise<void> {
       return discoveryFlow("recentlyUpdated", cfg, args);
     case "genre":
       return genreFlow(args.genre ?? "", cfg, args);
+    case "download":
+      return downloadFlow(args.query ?? "", cfg, args);
+    case "recommended":
+      return recommendedFlow(args.query ?? "", cfg, args);
+    case "follow":
+      return followFlow(args.query ?? "", cfg);
+    case "updates":
+      return updatesFlow(cfg, args);
+    case "library":
+      return libraryFlow(cfg, args);
   }
 }
 

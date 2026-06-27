@@ -1,6 +1,6 @@
 {
   "name": "manga-cli",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "A fast, lightweight terminal manga reader for atsu.moe — ani-cli energy, prettier.",
   "type": "module",
   "module": "src/index.ts",

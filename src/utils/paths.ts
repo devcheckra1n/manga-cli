@@ -17,6 +17,7 @@ export const CONFIG_DIR = join(baseDir("XDG_CONFIG_HOME", ".config"), APP);
 
 export const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 export const HISTORY_FILE = join(CONFIG_DIR, "history.json");
+export const FOLLOWS_FILE = join(CONFIG_DIR, "follows.json");
 
 export const COVERS_DIR = join(CACHE_DIR, "covers");
 export const PAGES_DIR = join(CACHE_DIR, "pages");

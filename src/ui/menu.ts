@@ -61,19 +61,16 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/**
- * Present `items` in fzf and return the chosen one (or null if cancelled).
- * Each line is `label \t index \t previewUrl`; only the label is shown/searched.
- */
-export async function fzfPick<T extends PickItem>(
+// Shared fzf invocation. Returns the indices the user selected (0..n) — a single
+// element for normal pick, possibly many when `multi` is set.
+async function runFzf<T extends PickItem>(
   items: T[],
-  opts: PickOpts = {},
-): Promise<T | null> {
-  if (items.length === 0) return null;
+  opts: PickOpts,
+  multi: boolean,
+): Promise<number[]> {
+  if (items.length === 0) return [];
 
-  const input = items
-    .map((it, i) => `${it.label}\t${i}\t${it.previewUrl ?? ""}`)
-    .join("\n");
+  const input = items.map((it, i) => `${it.label}\t${i}\t${it.previewUrl ?? ""}`).join("\n");
 
   const args = [
     "--ansi",
@@ -98,6 +95,7 @@ export async function fzfPick<T extends PickItem>(
     "--color",
     FZF_COLORS,
   ];
+  if (multi) args.push("--multi", "--bind", "tab:toggle+down,shift-tab:toggle+up");
   if (opts.header) args.push("--header", opts.header);
   if (opts.preview) {
     const script = await ensurePreviewScript();
@@ -109,18 +107,38 @@ export async function fzfPick<T extends PickItem>(
   const cfg = await loadConfig();
   if (cfg.fzfArgs.trim()) args.push(...cfg.fzfArgs.trim().split(/\s+/));
 
-  const proc = Bun.spawn(["fzf", ...args], {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "inherit",
-  });
+  const proc = Bun.spawn(["fzf", ...args], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
   proc.stdin.write(input);
   proc.stdin.end();
   const out = (await new Response(proc.stdout).text()).trim();
   await proc.exited;
 
-  if (!out) return null; // Esc / Ctrl-C / no match
-  const idx = Number(out.split("\t")[1]);
-  if (!Number.isInteger(idx) || idx < 0 || idx >= items.length) return null;
-  return items[idx] ?? null;
+  if (!out) return []; // Esc / Ctrl-C / no match
+  const indices: number[] = [];
+  for (const line of out.split("\n")) {
+    const idx = Number(line.split("\t")[1]);
+    if (Number.isInteger(idx) && idx >= 0 && idx < items.length) indices.push(idx);
+  }
+  return indices;
+}
+
+/**
+ * Present `items` in fzf and return the chosen one (or null if cancelled).
+ * Each line is `label \t index \t previewUrl`; only the label is shown/searched.
+ */
+export async function fzfPick<T extends PickItem>(
+  items: T[],
+  opts: PickOpts = {},
+): Promise<T | null> {
+  const [idx] = await runFzf(items, opts, false);
+  return idx === undefined ? null : items[idx] ?? null;
+}
+
+/** Multi-select variant (Tab to toggle). Returns the selected items in list order. */
+export async function fzfPickMulti<T extends PickItem>(
+  items: T[],
+  opts: PickOpts = {},
+): Promise<T[]> {
+  const indices = await runFzf(items, opts, true);
+  return indices.map((i) => items[i]).filter((x): x is T => x !== undefined);
 }

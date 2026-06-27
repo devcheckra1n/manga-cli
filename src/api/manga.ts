@@ -67,19 +67,10 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
-/** A discovery feed page. `page` is 0-based. */
-export async function getDiscovery(
-  kind: DiscoveryKind,
-  page = 0,
-  adult = false,
-): Promise<DiscoveryItem[]> {
-  const params: Record<string, string> = { page: String(page), types: ALL_TYPES };
-  if (adult) params.adult = "1";
-
-  const res = await apiGet<InfiniteResponse>(`/api/infinite/${kind}`, params);
-  return (res.items ?? []).map((it) => {
+function mapItems(items: Array<Record<string, unknown>> | undefined): DiscoveryItem[] {
+  return (items ?? []).map((it) => {
     const poster =
-      str(it.image) ?? str(it.mediumImage) ?? str(it.smallImage) ?? str(it.largeImage);
+      str(it.image) ?? str(it.mediumImage) ?? str(it.smallImage) ?? str(it.largeImage) ?? str(it.poster);
     return {
       id: String(it.id),
       title: str(it.title) ?? "Untitled",
@@ -90,6 +81,33 @@ export async function getDiscovery(
       views: str(it.views),
     };
   });
+}
+
+/** A discovery feed page. `page` is 0-based. */
+export async function getDiscovery(
+  kind: DiscoveryKind,
+  page = 0,
+  adult = false,
+): Promise<DiscoveryItem[]> {
+  const params: Record<string, string> = { page: String(page), types: ALL_TYPES };
+  if (adult) params.adult = "1";
+  const res = await apiGet<InfiniteResponse>(`/api/infinite/${kind}`, params);
+  return mapItems(res.items);
+}
+
+/** "More like this" feeds — keyed off a seed manga. `page` is 0-based. */
+export type RelatedKind = "mangaSimilar" | "mangaRecommendations";
+
+export async function getRelated(
+  mangaId: string,
+  kind: RelatedKind = "mangaRecommendations",
+  page = 0,
+  adult = false,
+): Promise<DiscoveryItem[]> {
+  const params: Record<string, string> = { mangaId, page: String(page), types: ALL_TYPES };
+  if (adult) params.adult = "1";
+  const res = await apiGet<InfiniteResponse>(`/api/infinite/${kind}`, params);
+  return mapItems(res.items);
 }
 
 /** Genre / tag / type / status options for filtered browsing. Cached 1h. */

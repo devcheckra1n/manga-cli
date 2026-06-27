@@ -24,11 +24,20 @@ Search, browse, and read manga inline in your terminal with real image rendering
 - 🏷️ **Genre browsing**
 - 🖼️ **Pixel-perfect inline reading** on capable terminals (Ghostty, kitty, WezTerm,
   iTerm2) with graceful fallback to colored ASCII everywhere else
-- 📚 **Right-to-left reading** (manga default) and **two-page spreads**
+- 📚 **Right-to-left reading** (manga default), **two-page spreads**, and
+  **long-strip / webtoon** scrolling (auto-detected for manhwa)
 - 🔍 **Live zoom & fit controls** for different render resolutions
+- ⬇️ **Download chapters** as **CBZ**, **ZIP**, **PDF**, or plain images — multi-select or by range
+- 📂 **Offline library** — read everything you've downloaded with no network
+- ❤️ **Follow series** and see new-chapter **updates** at a glance
+- ✨ **Recommendations** — "more like this" for any title
+- 📊 **Reading stats** — your manga "wrapped", all local
 - ⚡ **Feels instant** — aggressive disk caching + background page prefetch
 - 📖 **Reading history** with `--continue` to pick up exactly where you left off
 - 🪶 **Lean** — Bun + TypeScript, zero runtime npm dependencies (just `fzf` + `chafa`)
+
+> Spiritual successor energy to the wonderful (now archived) [Mangal](https://github.com/metafates/mangal):
+> a slick downloader **and** a real inline reader, in one lean binary.
 
 ## Install
 
@@ -81,7 +90,18 @@ manga-cli [flags] [query]
   -p, --popular           show popular manga
   -l, --latest            show latest updates
   -g, --genre <genre>     browse by genre
+  -r, --recommended [q]   "more like this" — recommendations for a title
+      --follow [query]    follow a series for new-chapter updates
+  -u, --updates           show followed series that have new chapters
+      --library           browse & read your downloads offline
+      --stats             your reading stats / "wrapped"
+  -d, --download <query>  download chapters (CBZ / ZIP / PDF / images)
+  -f, --format <fmt>      download format: cbz · zip · pdf · images
+      --chapters <spec>   pick chapters non-interactively: 1-10 · 1,3,5 · all · latest
+      --out <dir>         download into <dir> (overrides config)
+      where               print config / cache / download paths
       --dual              open in two-page (spread) mode
+      --webtoon           long-strip scroll mode (auto-detected for manhwa)
       --single            force single-page mode
       --rtl / --ltr       reading direction (manga is rtl, the default)
       --browser           open in your web browser instead of the terminal
@@ -101,6 +121,57 @@ manga-cli -g action    # browse action manga
 manga-cli -c           # continue reading
 ```
 
+## Downloading
+
+Borrowed from [Mangal](https://github.com/metafates/mangal): grab chapters to read
+offline or load into your library (Komga, Tachiyomi/Mihon, YACReader, …).
+
+```bash
+manga-cli -d berserk                          # search, multi-select chapters (Tab), download as CBZ
+manga-cli -d berserk --chapters 1-10          # chapters 1–10
+manga-cli -d "one piece" --chapters latest -f pdf   # newest chapter, as a PDF
+manga-cli -d vagabond --chapters all -f cbz --out ~/manga
+```
+
+In the interactive chapter list, **Tab** toggles a chapter and **Enter** downloads the
+selection; already-downloaded chapters are marked ✓. `--chapters` accepts ranges
+(`1-10`), lists (`1,3,5`), `all`, `first`, or `latest`.
+
+| Format | Output | Notes |
+|--------|--------|-------|
+| `cbz` *(default)* | `<Title>/<Title> - 0007 Ch.7.cbz` | standard comic archive; opens everywhere |
+| `zip` | `… .zip` | same as CBZ with a `.zip` extension |
+| `images` | `…/0007 Ch.7/001.webp …` | raw page files in a folder |
+| `pdf` | `… .pdf` | needs an image converter — uses `sips` (preinstalled on macOS) or ImageMagick |
+
+Files land in `downloadDir` (`~/Downloads/manga-cli` by default). Run `manga-cli where`
+to see all paths.
+
+## Follow, discover & track
+
+```bash
+manga-cli --follow berserk    # follow a series (remembers the chapter count)
+manga-cli -u                  # which followed titles have new chapters (+N badges)
+manga-cli -r                  # recommendations based on your last read
+manga-cli -r "chainsaw man"   # "more like this" for a specific title
+manga-cli --library           # browse & read your downloads — fully offline
+manga-cli --stats             # your reading "wrapped": streaks, top titles, weekly chart
+```
+
+- **Following is local** — no account needed. `--updates` re-checks followed titles and
+  badges the ones with new chapters; press **`b`** in the reader to follow/unfollow.
+- **`--library`** reads downloaded CBZ/ZIP/folders back through the same reader, with
+  zero network. (PDF downloads are for your viewer; the library reads image archives.)
+- **`--stats`** is computed entirely from your local history — nothing leaves your machine.
+
+## Long-strip (webtoon) mode
+
+Manhwa/manhua pages are single images thousands of pixels tall, so manga-cli has a
+**vertical scroll** mode: scroll with `↑`/`↓`/`space` instead of flipping pages. It's
+**auto-enabled** for long-strip titles, or toggle it anytime with **`w`** (or start with
+`--webtoon`). Long-strip rendering uses high-density colored symbols so it works in every
+terminal.
+
 ## Reader controls
 
 | Key | Action |
@@ -110,9 +181,12 @@ manga-cli -c           # continue reading
 | `p` | previous page |
 | `]` · `[` | next / previous chapter |
 | `g` · `G` | first / last page |
+| `↑` · `↓` | scroll (in long-strip / webtoon mode) |
+| `w` | toggle long-strip (webtoon) scrolling |
 | `d` | toggle two-page spread |
 | `m` | toggle reading direction (RTL ⇄ LTR) |
 | `f` | toggle fit (whole page ⇄ fill width) |
+| `b` | follow / unfollow this series |
 | `+` · `-` · `0` | zoom in / out / reset |
 | `s` | save current page to your downloads dir |
 | `r` | re-render (after a terminal resize) |
@@ -153,6 +227,7 @@ with `readerMode` in the config if you like.
   "fit": "page",
   "zoom": 1.0,
   "hudReserve": 2,
+  "downloadFormat": "cbz",
   "chafaSize": "auto",
   "prefetchPages": 2,
   "showBanner": true,
@@ -168,21 +243,23 @@ with `readerMode` in the config if you like.
 - `fit`: `"page"` (whole page) · `"width"` (fill width)
 - `zoom`: render scale `0.4`–`1.0` (lower = smaller/lower-res, more margin)
 - `hudReserve`: rows kept clear at the bottom for the status bar
+- `downloadFormat`: default for `--download` — `"cbz"` · `"zip"` · `"pdf"` · `"images"`
 - `prefetchPages`: how many upcoming pages to fetch in the background
 
 ### Cache & data
 
-- `~/.cache/manga-cli/` — covers, page images, and TTL'd API responses
-  (`$XDG_CACHE_HOME` respected). Safe to delete anytime.
+- `~/.cache/manga-cli/` — covers, page images, extracted archives, and TTL'd API
+  responses (`$XDG_CACHE_HOME` respected). Safe to delete anytime.
 - `~/.config/manga-cli/history.json` — reading history.
+- `~/.config/manga-cli/follows.json` — followed series (for `--updates`).
 
 ## Architecture
 
 ```
 src/
-├── api/        atsu.moe client (search, manga, chapters) + endpoints.md
-├── ui/         banner, fzf menu, reader, spinner, terminal detection
-├── utils/      config, cache, history, image, paths
+├── api/        atsu.moe client (search, manga, chapters, recommendations) + endpoints.md
+├── ui/         banner, fzf menu, reader (page + webtoon), spinner, terminal detection
+├── utils/      config, cache, history, follows, library, stats, image, download, paths
 └── index.ts    CLI parsing + flows
 ```
 

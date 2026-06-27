@@ -10,6 +10,13 @@ export type ReaderMode = "auto" | "kitty" | "iterm2" | "chafa";
 export type Direction = "rtl" | "ltr";
 /** How a single page fills the screen. */
 export type FitMode = "page" | "width";
+/** Output format for chapter downloads. */
+export type DownloadFormat = "cbz" | "zip" | "pdf" | "images";
+
+const DOWNLOAD_FORMATS: readonly DownloadFormat[] = ["cbz", "zip", "pdf", "images"];
+export function isDownloadFormat(s: string): s is DownloadFormat {
+  return (DOWNLOAD_FORMATS as readonly string[]).includes(s);
+}
 
 export interface Config {
   source: string;
@@ -24,6 +31,8 @@ export interface Config {
   zoom: number;
   /** Rows reserved at the bottom for the HUD (prevents images clipping it). */
   hudReserve: number;
+  /** Default packaging format for `--download`. */
+  downloadFormat: DownloadFormat;
   chafaSize: string;
   prefetchPages: number;
   showBanner: boolean;
@@ -41,6 +50,7 @@ export const DEFAULT_CONFIG: Config = {
   fit: "page",
   zoom: 1.0,
   hudReserve: 2,
+  downloadFormat: "cbz",
   chafaSize: "auto",
   prefetchPages: 2,
   showBanner: true,
@@ -71,6 +81,7 @@ export async function loadConfig(): Promise<Config> {
   merged.downloadDir = expandTilde(merged.downloadDir);
   merged.zoom = clampZoom(merged.zoom);
   merged.hudReserve = Math.max(1, Math.min(6, Math.floor(merged.hudReserve)));
+  if (!isDownloadFormat(merged.downloadFormat)) merged.downloadFormat = "cbz";
   cached = merged;
   return cached;
 }
