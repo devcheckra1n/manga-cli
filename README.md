@@ -32,6 +32,9 @@ Search, browse, and read manga inline in your terminal with real image rendering
 - ❤️ **Follow series** and see new-chapter **updates** at a glance
 - ✨ **Recommendations** — "more like this" for any title
 - 📊 **Reading stats** — your manga "wrapped", all local
+- 🔀 **Multiple sources with fallback** — atsu.moe primary, **Weeb Central** + **MangaDex**
+  backups; if one's down it transparently routes to the next
+- 🧲 **Torrent dumps via nyaa.si** — grab full-volume manga with `aria2c` (with a VPN check)
 - ⚡ **Feels instant** — aggressive disk caching + background page prefetch
 - 📖 **Reading history** with `--continue` to pick up exactly where you left off
 - 🪶 **Lean** — Bun + TypeScript, zero runtime npm dependencies (just `fzf` + `chafa`)
@@ -99,6 +102,8 @@ manga-cli [flags] [query]
   -f, --format <fmt>      download format: cbz · zip · pdf · images
       --chapters <spec>   pick chapters non-interactively: 1-10 · 1,3,5 · all · latest
       --out <dir>         download into <dir> (overrides config)
+  -S, --source <id>       force a source: atsumaru · mangadex
+      sources             list sources & the fallback chain
       where               print config / cache / download paths
       --dual              open in two-page (spread) mode
       --webtoon           long-strip scroll mode (auto-detected for manhwa)
@@ -164,6 +169,60 @@ manga-cli --stats             # your reading "wrapped": streaks, top titles, wee
   zero network. (PDF downloads are for your viewer; the library reads image archives.)
 - **`--stats`** is computed entirely from your local history — nothing leaves your machine.
 
+## Sources
+
+manga-cli reads from **atsu.moe** by default and falls back automatically when it's
+unreachable or has no match:
+
+```bash
+manga-cli sources                 # list sources + the fallback chain
+manga-cli -S mangadex one piece   # force a specific source for this run
+```
+
+| Source | Status | Notes |
+|--------|--------|-------|
+| `atsumaru` | ✅ primary | atsu.moe — richest metadata & discovery feeds |
+| `weebcentral` | ✅ backup | weebcentral.com — huge, current scanlation library |
+| `mangadex` | ✅ backup | mangadex.org — open API (some titles delicensed) |
+| `mangadot` | ✖ unmapped | mangadot.net — SPA API not reverse-engineered yet |
+
+If the primary source is down or returns nothing, the next source answers
+automatically — a manga then stays bound to whichever source found it (so chapters and
+pages always load from the right place). Set the primary with `-S/--source` or the
+`source` / `fallback` keys in config.
+
+```bash
+manga-cli -S weebcentral chainsaw man   # read from a specific source
+manga-cli sources                       # show the chain & status
+```
+
+> **While atsu.moe is down**, set `weebcentral` as your primary for instant results
+> (otherwise each call waits out atsu's timeout before falling back):
+> `manga-cli -S weebcentral …` or `"source": "weebcentral"` in config.
+>
+> **MangaDex note:** many licensed series (Jujutsu Kaisen, Solo Leveling, …) are
+> delicensed/external-only there, so they may show no readable chapters — weebcentral
+> usually has them. Search prefers English but falls back to the best available language.
+
+## Downloading torrents (nyaa.si)
+
+For full-volume dumps and raws, manga-cli can grab manga torrents from
+[nyaa.si](https://nyaa.si) via **aria2c** (magnet links). It stays strictly inside
+nyaa's **Literature** category, so it never touches the anime section.
+
+```bash
+manga-cli nyaa berserk                 # pick a dump type, then a torrent
+manga-cli nyaa "one piece" --dump raw  # raw (original-language) dumps
+```
+
+**Dump types** (`--dump`): `eng` (English-translated) · `raw` (original) ·
+`non-eng` (other languages) · `all` (everything in Literature).
+
+⚠️ **VPN check** — before any download, manga-cli checks your public IP (via ip-api).
+If it looks like a residential ISP (i.e. **VPN off**), it warns and asks you to confirm.
+Torrenting exposes your IP to peers — keep your VPN on. Requires `aria2c`
+(`brew install aria2`); downloads land in `<downloadDir>/nyaa/`.
+
 ## Long-strip (webtoon) mode
 
 Manhwa/manhua pages are single images thousands of pixels tall, so manga-cli has a
@@ -181,6 +240,7 @@ terminal.
 | `p` | previous page |
 | `]` · `[` | next / previous chapter |
 | `g` · `G` | first / last page |
+| `:` · `#` | go to page — type a number, then Enter |
 | `↑` · `↓` | scroll (in long-strip / webtoon mode) |
 | `w` | toggle long-strip (webtoon) scrolling |
 | `d` | toggle two-page spread |
@@ -221,6 +281,7 @@ with `readerMode` in the config if you like.
 ```json
 {
   "source": "atsumaru",
+  "fallback": ["weebcentral", "mangadex", "mangadot"],
   "readerMode": "auto",
   "direction": "rtl",
   "dualPage": false,
@@ -237,6 +298,8 @@ with `readerMode` in the config if you like.
 }
 ```
 
+- `source`: primary backend — `"atsumaru"` · `"weebcentral"` · `"mangadex"`
+- `fallback`: ordered backups tried when the primary fails (see [Sources](#sources))
 - `readerMode`: `"auto"` (detect) · `"kitty"` · `"iterm2"` · `"chafa"`
 - `direction`: `"rtl"` (manga) · `"ltr"` (comics/webtoons)
 - `dualPage`: start in two-page spread mode
@@ -257,9 +320,9 @@ with `readerMode` in the config if you like.
 
 ```
 src/
-├── api/        atsu.moe client (search, manga, chapters, recommendations) + endpoints.md
+├── api/        HTTP client, source registry + fallback, sources/ (atsumaru, weebcentral, mangadex) + endpoints.md
 ├── ui/         banner, fzf menu, reader (page + webtoon), spinner, terminal detection
-├── utils/      config, cache, history, follows, library, stats, image, download, paths
+├── utils/      config, cache, history, follows, library, stats, image, download, nyaa, vpn, paths
 └── index.ts    CLI parsing + flows
 ```
 

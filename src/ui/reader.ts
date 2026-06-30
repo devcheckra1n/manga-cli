@@ -65,6 +65,7 @@ type KeyAction =
   | "rerender"
   | "jump"
   | "save"
+  | "gotoPage"
   | "help"
   | "quit";
 
@@ -119,6 +120,9 @@ function mapKey(raw: string, rtl: boolean): KeyAction | null {
       return "jump";
     case "s":
       return "save";
+    case ":":
+    case "#":
+      return "gotoPage";
     case "?":
       return "help";
     case "q":
@@ -195,6 +199,10 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
   let webtoon = ctx.webtoon ?? false;
   let followed = ctx.noFollow ? false : await isFollowed(manga.id);
 
+  // Go-to-page input state (captures digits typed after ':').
+  let gotoMode = false;
+  let gotoBuf = "";
+
   // Webtoon (long-strip) scroll state.
   let scrollOff = 0; // line offset within the current page's rendered strip
   let webtoonMax = 0; // last computed max scroll offset (for nav decisions)
@@ -227,6 +235,7 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
     await recordHistory({
       id: manga.id,
       title: manga.title,
+      source: manga.source,
       coverUrl: manga.poster,
       lastChapterId: ch.id,
       lastChapterNumber: ch.number,
@@ -418,8 +427,8 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
         ? `Ch.${ch.number} · ${ch.title}  [${modeFlags}]`
         : `Ch.${ch.number}  [${modeFlags}]`;
     const help = webtoon
-      ? "↑↓ scroll · ] chapter · w pages · b follow · q quit"
-      : "n/p move · d 2p · w strip · b follow · ? help · q quit";
+      ? "↑↓ scroll · : page · ] chapter · w pages · q quit"
+      : "n/p move · : page · d 2p · b follow · ? help · q quit";
     const rightPlain = ` ${flash ?? help} `;
 
     const fixed = leftPlain.length + rightPlain.length + 4 + (followed ? 2 : 0);
@@ -455,6 +464,7 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
       "  n / p           next / previous page",
       "  ] / [           next / previous chapter",
       "  g / G           first / last page",
+      "  : (or #)        go to page — type a number, Enter",
       "  w               toggle long-strip (webtoon) mode",
       "  d               toggle dual-page spread",
       "  m               toggle reading direction",
@@ -522,7 +532,35 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
     while (true) {
       const next = await keys.next();
       if (next.done || next.value === undefined) break;
-      const action = mapKey(next.value, rtl());
+      const raw = next.value;
+
+      // While entering a page number, capture digits until Enter / Esc.
+      if (gotoMode) {
+        if (raw === "\r" || raw === "\n") {
+          gotoMode = false;
+          const total = chapter.pages.length;
+          const n = parseInt(gotoBuf, 10);
+          if (Number.isFinite(n) && n >= 1 && total > 0) {
+            const target = Math.min(Math.max(0, n - 1), total - 1);
+            pageIndex = dual ? target - (target % 2) : target;
+            scrollOff = 0;
+            await render(`→ page ${target + 1}/${total}`);
+            await recordProgress();
+          } else {
+            await render();
+          }
+        } else if (raw === "\x1b" || raw === "\x03" || raw === "q") {
+          gotoMode = false;
+          drawHud();
+        } else {
+          if (raw === "\x7f" || raw === "\b") gotoBuf = gotoBuf.slice(0, -1);
+          else if (/^[0-9]$/.test(raw)) gotoBuf = (gotoBuf + raw).slice(0, 6);
+          drawHud(`go to page (1-${chapter.pages.length}): ${gotoBuf}▏`);
+        }
+        continue;
+      }
+
+      const action = mapKey(raw, rtl());
       if (!action) continue;
 
       if (action === "quit") {
@@ -532,6 +570,12 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
       if (action === "jump") {
         result = { action: "jump" };
         break;
+      }
+      if (action === "gotoPage") {
+        gotoMode = true;
+        gotoBuf = "";
+        drawHud(`go to page (1-${chapter.pages.length}): ▏`);
+        continue;
       }
       if (action === "help") {
         drawHelp();
@@ -657,6 +701,7 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
             followed = await toggleFollow({
               id: manga.id,
               title: manga.title,
+              source: manga.source,
               coverUrl: manga.poster,
               chapterCount: info.chapters.length,
             });

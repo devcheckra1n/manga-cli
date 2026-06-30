@@ -4,6 +4,12 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { CONFIG_FILE, CONFIG_DIR, expandTilde } from "./paths.ts";
+import type { SourceId } from "../api/types.ts";
+
+const SOURCE_IDS: readonly SourceId[] = ["atsumaru", "mangadex", "weebcentral", "mangadot"];
+export function isSourceId(s: string): s is SourceId {
+  return (SOURCE_IDS as readonly string[]).includes(s);
+}
 
 export type ReaderMode = "auto" | "kitty" | "iterm2" | "chafa";
 /** Reading direction. Manga is right-to-left; comics/webtoons are left-to-right. */
@@ -19,7 +25,10 @@ export function isDownloadFormat(s: string): s is DownloadFormat {
 }
 
 export interface Config {
-  source: string;
+  /** Primary content source. */
+  source: SourceId;
+  /** Ordered backups tried when the primary fails or has no result. */
+  fallback: SourceId[];
   readerMode: ReaderMode;
   /** Reading direction — controls which arrow advances the page. */
   direction: Direction;
@@ -44,6 +53,7 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
   source: "atsumaru",
+  fallback: ["weebcentral", "mangadex", "mangadot"],
   readerMode: "auto",
   direction: "rtl",
   dualPage: false,
@@ -79,6 +89,8 @@ export async function loadConfig(): Promise<Config> {
     // Malformed config → fall back to defaults rather than crashing.
   }
   merged.downloadDir = expandTilde(merged.downloadDir);
+  if (!isSourceId(merged.source)) merged.source = "atsumaru";
+  merged.fallback = (Array.isArray(merged.fallback) ? merged.fallback : []).filter(isSourceId);
   merged.zoom = clampZoom(merged.zoom);
   merged.hudReserve = Math.max(1, Math.min(6, Math.floor(merged.hudReserve)));
   if (!isDownloadFormat(merged.downloadFormat)) merged.downloadFormat = "cbz";

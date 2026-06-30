@@ -2,10 +2,12 @@
 
 import { mkdir } from "node:fs/promises";
 import { HISTORY_FILE, CONFIG_DIR } from "./paths.ts";
+import type { SourceId } from "../api/types.ts";
 
 export interface HistoryEntry {
   id: string;
   title: string;
+  source?: SourceId;
   coverUrl?: string;
   lastChapterId: string;
   lastChapterNumber: number;

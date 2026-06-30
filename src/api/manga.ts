@@ -3,7 +3,8 @@
 import { apiGet, resolveAssetUrl } from "./client.ts";
 import { readCache, writeCache } from "../utils/cache.ts";
 import { MANGA_CACHE } from "../utils/paths.ts";
-import type { MangaInfo, DiscoveryItem, Filters } from "./types.ts";
+import type { MangaInfo, DiscoveryItem, Filters, DiscoveryKind } from "./types.ts";
+export type { DiscoveryKind };
 
 const TTL = 60 * 60 * 1000; // 1 hour
 const ALL_TYPES = "Manga,Manwha,Manhua,OEL";
@@ -50,14 +51,6 @@ export async function getMangaInfo(mangaId: string): Promise<MangaInfo> {
   await writeCache(MANGA_CACHE, key, info);
   return info;
 }
-
-export type DiscoveryKind =
-  | "trending"
-  | "popular"
-  | "recentlyAdded"
-  | "recentlyUpdated"
-  | "topRated"
-  | "mostBookmarked";
 
 interface InfiniteResponse {
   items?: Array<Record<string, unknown>>;

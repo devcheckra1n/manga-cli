@@ -1,7 +1,10 @@
-// Shared domain types for the atsu.moe (Atsumaru) API.
-// See ./endpoints.md for the reverse-engineered endpoint reference.
+// Shared domain types across all sources (Atsumaru, MangaDex, …).
+// See ./endpoints.md for the reverse-engineered Atsumaru endpoint reference.
 
-/** A manga as returned by the Typesense search proxy. */
+/** Which backend a manga came from (so info/chapters/pages route back to it). */
+export type SourceId = "atsumaru" | "mangadex" | "weebcentral" | "mangadot";
+
+/** A manga as returned by search. */
 export interface SearchResult {
   id: string;
   title: string;
@@ -12,11 +15,12 @@ export interface SearchResult {
   status?: string;
   year?: number;
   isAdult: boolean;
-  rating?: number; // mbRating (MangaBaka rating)
-  popularity?: string; // e.g. "2.6M" — note: API field is misspelled "populairty"
+  rating?: number;
+  popularity?: string;
+  source?: SourceId;
 }
 
-/** A manga as returned by the discovery (/api/infinite/*) endpoints. */
+/** A manga as returned by the discovery feeds. */
 export interface DiscoveryItem {
   id: string;
   title: string;
@@ -25,6 +29,7 @@ export interface DiscoveryItem {
   isAdult: boolean;
   rating?: number;
   views?: string;
+  source?: SourceId;
 }
 
 /** Lightweight reference to a manga, enough to open it. */
@@ -32,6 +37,7 @@ export interface MangaRef {
   id: string;
   title: string;
   poster?: string;
+  source?: SourceId;
 }
 
 /** A single chapter within a manga. */
@@ -84,4 +90,28 @@ export interface Filters {
   tags: Genre[];
   types: Genre[];
   statuses: Genre[];
+}
+
+/** Discovery feed kinds, mapped per-source to the nearest equivalent. */
+export type DiscoveryKind =
+  | "trending"
+  | "popular"
+  | "recentlyAdded"
+  | "recentlyUpdated"
+  | "topRated"
+  | "mostBookmarked";
+
+/** A content backend. Every read operation routes through one of these. */
+export interface Source {
+  readonly id: SourceId;
+  readonly label: string;
+  /** False for sources we know are blocked (e.g. anti-bot) — skipped in fallback. */
+  readonly available: boolean;
+  search(query: string, opts: { adult?: boolean; page?: number }): Promise<SearchResult[]>;
+  discovery(kind: DiscoveryKind, page: number, adult: boolean): Promise<DiscoveryItem[]>;
+  filters(): Promise<Filters>;
+  browseGenre(genreId: string, adult: boolean): Promise<SearchResult[]>;
+  info(mangaId: string): Promise<MangaInfo>;
+  pages(mangaId: string, chapterId: string): Promise<ReadChapter>;
+  related(mangaId: string, page: number, adult: boolean): Promise<DiscoveryItem[]>;
 }

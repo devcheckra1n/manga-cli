@@ -4,10 +4,12 @@
 
 import { mkdir } from "node:fs/promises";
 import { FOLLOWS_FILE, CONFIG_DIR } from "./paths.ts";
+import type { SourceId } from "../api/types.ts";
 
 export interface FollowEntry {
   id: string;
   title: string;
+  source?: SourceId;
   coverUrl?: string;
   /** Chapter count last time we checked (the baseline for "new chapters"). */
   chapterCount: number;

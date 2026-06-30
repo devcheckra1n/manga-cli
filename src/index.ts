@@ -2,13 +2,29 @@
 // manga-cli — a fast, lightweight terminal manga reader for atsu.moe.
 
 import { ApiError } from "./api/client.ts";
-import { searchManga, browseByFilter } from "./api/search.ts";
-import { getMangaInfo, getDiscovery, getFilters, getRelated, type DiscoveryKind } from "./api/manga.ts";
-import type { MangaInfo, MangaRef, SearchResult, DiscoveryItem, Chapter } from "./api/types.ts";
+import {
+  searchAny,
+  discoveryAny,
+  filtersAny,
+  getSource,
+  primaryId,
+  configureSources,
+  allSources,
+} from "./api/source.ts";
+import type {
+  MangaInfo,
+  MangaRef,
+  SearchResult,
+  DiscoveryItem,
+  Chapter,
+  DiscoveryKind,
+  SourceId,
+} from "./api/types.ts";
 import {
   loadConfig,
   ensureConfigFile,
   isDownloadFormat,
+  isSourceId,
   type Config,
   type DownloadFormat,
 } from "./utils/config.ts";
@@ -22,6 +38,9 @@ import {
 import { loadFollows, addFollow, markSeen } from "./utils/follows.ts";
 import { scanLibrary, toReaderSource, type LibrarySeries } from "./utils/library.ts";
 import { computeStats } from "./utils/stats.ts";
+import { searchNyaa, downloadMagnet, DUMP_TYPES, dumpCat, type DumpType } from "./utils/nyaa.ts";
+import { checkVpn } from "./utils/vpn.ts";
+import { join } from "node:path";
 import { CONFIG_FILE, CACHE_DIR, HISTORY_FILE, expandTilde } from "./utils/paths.ts";
 import { banner, shouldShowBanner } from "./ui/banner.ts";
 import { c } from "./ui/colors.ts";
@@ -31,7 +50,7 @@ import { withSpinner, Spinner } from "./ui/progress.ts";
 import { resolveProtocol, inTmux } from "./ui/protocol.ts";
 import { runReader } from "./ui/reader.ts";
 
-const VERSION = "0.3.0";
+const VERSION = "0.8.0";
 
 // ── CLI parsing ───────────────────────────────────────────────────────────────
 
@@ -51,6 +70,8 @@ type Command =
   | "updates"
   | "library"
   | "stats"
+  | "sources"
+  | "nyaa"
   | "help"
   | "version";
 
@@ -68,6 +89,9 @@ interface Args {
   format?: DownloadFormat;
   chapters?: string;
   out?: string;
+  source?: SourceId;
+  dump?: DumpType;
+  noVpnCheck?: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -140,6 +164,25 @@ function parseArgs(argv: string[]): Args {
         else if (v) console.error(c.yellow(`unknown format “${v}” — using default`));
         break;
       }
+      case "-S":
+      case "--source": {
+        const v = argv[++i];
+        if (v && isSourceId(v)) args.source = v;
+        else if (v) console.error(c.yellow(`unknown source “${v}” — using config default`));
+        break;
+      }
+      case "--sources":
+        args.command = "sources";
+        break;
+      case "--dump": {
+        const v = argv[++i];
+        if (v && DUMP_TYPES.some((d) => d.id === v)) args.dump = v as DumpType;
+        else if (v) console.error(c.yellow(`unknown dump type “${v}” (eng · raw · non-eng · all)`));
+        break;
+      }
+      case "--no-vpn-check":
+        args.noVpnCheck = true;
+        break;
       case "--chapters":
       case "--chapter": {
         const v = argv[++i];
@@ -235,6 +278,11 @@ function parseArgs(argv: string[]): Args {
       args.command = "library";
     } else if (args.command === "interactive" && first === "stats") {
       args.command = "stats";
+    } else if (args.command === "interactive" && (first === "sources" || first === "source")) {
+      args.command = "sources";
+    } else if (args.command === "interactive" && (first === "nyaa" || first === "torrent" || first === "magnet")) {
+      args.command = "nyaa";
+      if (rest) args.query = rest;
     } else if (args.command === "interactive" && (first === "updates" || first === "u")) {
       args.command = "updates";
     } else if (args.command === "interactive" && (first === "recommended" || first === "recs")) {
@@ -278,6 +326,11 @@ ${b("COMMANDS / FLAGS")}
   ${k("-f, --format")} <fmt>      download format: cbz · zip · pdf · images
   ${k("    --chapters")} <spec>   pick chapters non-interactively: 1-10 · 1,3,5 · all · latest
   ${k("    --out")} <dir>         download into <dir> (overrides config)
+  ${k("-S, --source")} <id>       force: atsumaru · weebcentral · mangadex
+  ${k("    sources")}            list sources & the fallback chain
+  ${k("    nyaa")} [query]        download manga torrents via nyaa.si + aria2c
+  ${k("    --dump")} <type>       nyaa dump: eng · raw · non-eng · all
+  ${k("    --no-vpn-check")}      skip the pre-torrent VPN check
   ${k("    where")}              print config / cache / download paths
   ${k("    --dual")}             open in two-page (spread) mode
   ${k("    --webtoon")}          long-strip scroll mode (auto for manhwa)
@@ -295,6 +348,7 @@ ${b("READER KEYS")}
   ${k("n / p")}          next / previous page
   ${k("] / [")}          next / previous chapter
   ${k("g / G")}          first / last page
+  ${k(": (or #)")}       go to page — type a number, then Enter
   ${k("↑ / ↓")}          scroll (in long-strip mode)
   ${k("w")}              toggle long-strip (webtoon) scroll
   ${k("d")}              toggle dual-page spread
@@ -318,7 +372,17 @@ ${b("EXAMPLES")}
   manga-cli --library                     ${c.dim("# read your downloads offline")}
   manga-cli --stats                       ${c.dim("# your reading wrapped")}
 
+${b("SOURCES")}  ${c.dim("atsu.moe primary, with fallback")}
+  ${k("atsumaru")}     atsu.moe          ${c.dim("primary (richest metadata)")}
+  ${k("weebcentral")}  weebcentral.com   ${c.dim("huge current scanlation library")}
+  ${k("mangadex")}     mangadex.org      ${c.dim("open API (some titles delicensed)")}
+  ${k("mangadot")}     mangadot.net      ${c.dim("not yet mapped")}
+  ${c.dim("If the primary is down/empty, the next source answers automatically.")}
+  ${c.dim("Pick a main source with -S/--source, or `source`/`fallback` in config.")}
+
 ${b("SETTINGS")}  ${c.dim("~/.config/manga-cli/config.json")}
+  ${k("source")}       atsumaru · weebcentral · mangadex  ${c.dim("(primary source)")}
+  ${k("fallback")}     [\"weebcentral\", …]                 ${c.dim("(ordered backups)")}
   ${k("readerMode")}   auto · kitty · iterm2 · chafa     ${c.dim("(image protocol)")}
   ${k("direction")}    rtl · ltr                          ${c.dim("(manga is rtl)")}
   ${k("dualPage")}     true · false                       ${c.dim("(two-page spreads)")}
@@ -326,7 +390,6 @@ ${b("SETTINGS")}  ${c.dim("~/.config/manga-cli/config.json")}
   ${k("zoom")}         0.4 – 1.0                          ${c.dim("(render scale)")}
   ${k("downloadFormat")} cbz · zip · pdf · images        ${c.dim("(default download format)")}
   ${k("prefetchPages")} number of pages to prefetch
-  ${k("adult")}        include 18+ content by default
   ${k("downloadDir")}  where downloads & saved pages go
 
 ${b("DEPENDENCIES")}  ${c.dim("fzf + chafa")}
@@ -367,7 +430,9 @@ function chapterLabel(ch: Chapter): string {
   const title =
     ch.title && ch.title !== `Chapter ${ch.number}` ? c.gray(` · ${ch.title}`) : "";
   const date = ch.createdAt ? c.dim("  " + new Date(ch.createdAt).toLocaleDateString()) : "";
-  return `${c.bold(c.cyan(`Ch.${ch.number}`))}${title}   ${c.dim(`${ch.pageCount}p`)}${date}`;
+  // Page counts aren't known for every source (weebcentral/local) — hide "0p".
+  const pages = ch.pageCount > 0 ? `   ${c.dim(`${ch.pageCount}p`)}` : "";
+  return `${c.bold(c.cyan(`Ch.${ch.number}`))}${title}${pages}${date}`;
 }
 
 function relativeTime(iso: string): string {
@@ -444,19 +509,33 @@ interface Resume {
   page: number;
 }
 
+function chapterWebUrl(source: SourceId, mangaId: string, chapterId: string): string {
+  if (source === "mangadex") return `https://mangadex.org/chapter/${chapterId}`;
+  if (source === "weebcentral") return `https://weebcentral.com/chapters/${chapterId}`;
+  if (source === "mangadot") return `https://mangadot.net/read/${chapterId}`;
+  return `https://atsu.moe/read/${mangaId}/${chapterId}`;
+}
+
 async function openManga(
   ref: MangaRef,
   cfg: Config,
   args: Args,
   resume?: Resume,
 ): Promise<void> {
-  const info: MangaInfo = await withSpinner(`loading ${ref.title} …`, () => getMangaInfo(ref.id));
+  const source = getSource(ref.source);
+  const info: MangaInfo = await withSpinner(`loading ${ref.title} …`, () => source.info(ref.id));
   if (info.chapters.length === 0) {
-    console.log(c.yellow("No readable chapters for this title."));
+    const alt = allSources().find((s) => s.available && s.id !== source.id)?.id;
+    console.log(
+      c.yellow(`No readable chapters for “${ref.title}” via ${source.id}.`) +
+        (alt ? c.dim(`  Try another source: -S ${alt}`) : ""),
+    );
     return;
   }
   const title = info.title || ref.title;
-  const fullRef: MangaRef = { ...ref, title };
+  const fullRef: MangaRef = { ...ref, title, source: source.id };
+  const loadChapter = (idx: number): Promise<import("./api/types.ts").ReadChapter> =>
+    source.pages(ref.id, info.chapters[idx].id);
 
   const protocol = resolveProtocol(cfg.readerMode);
   if (!args.browser) warnTmux(protocol);
@@ -477,7 +556,7 @@ async function openManga(
 
     if (args.browser) {
       const ch = info.chapters[chapterIndex];
-      if (ch) openInBrowser(`https://atsu.moe/read/${ref.id}/${ch.id}`);
+      if (ch) openInBrowser(chapterWebUrl(source.id, ref.id, ch.id));
       return;
     }
 
@@ -495,6 +574,7 @@ async function openManga(
       zoom: cfg.zoom,
       hudReserve: cfg.hudReserve,
       webtoon: args.webtoon || info.forceStrip,
+      loadChapter,
     });
     startPage = 0;
     if (result.action === "quit") return;
@@ -514,10 +594,18 @@ async function pickChapter(info: MangaInfo): Promise<number | null> {
   return picked ? picked.idx : null;
 }
 
+function sourceTag(source: SourceId): string {
+  return source === primaryId() ? "" : c.dim(`  · via ${source}`);
+}
+
+function refOf(r: SearchResult | DiscoveryItem): MangaRef {
+  return { id: r.id, title: r.title, poster: r.poster, source: r.source };
+}
+
 async function searchFlow(query: string, cfg: Config, args: Args): Promise<void> {
   if (!query.trim()) return interactiveSearch(cfg, args);
-  const results = await withSpinner(`searching “${query}” …`, () =>
-    searchManga(query, { adult: cfg.adult }),
+  const { items: results, source } = await withSpinner(`searching “${query}” …`, () =>
+    searchAny(query, { adult: cfg.adult }),
   );
   if (results.length === 0) {
     console.log(c.yellow(`No results for “${query}”.`));
@@ -526,15 +614,11 @@ async function searchFlow(query: string, cfg: Config, args: Args): Promise<void>
   const items = results.map((r) => ({ label: searchLabel(r), previewUrl: r.poster, ref: r }));
   const picked = await fzfPick(items, {
     prompt: "manga ❯ ",
-    header: `${results.length} results for “${query}”`,
+    header: `${results.length} results for “${query}”${sourceTag(source)}`,
     preview: true,
   });
   if (!picked) return;
-  await openManga(
-    { id: picked.ref.id, title: picked.ref.title, poster: picked.ref.poster },
-    cfg,
-    args,
-  );
+  await openManga(refOf(picked.ref), cfg, args);
 }
 
 async function interactiveSearch(cfg: Config, args: Args): Promise<void> {
@@ -555,7 +639,7 @@ async function continueFlow(cfg: Config, args: Args): Promise<void> {
       c.dim(` — Ch.${recent.lastChapterNumber} · p.${recent.lastPage + 1}`),
   );
   await openManga(
-    { id: recent.id, title: recent.title, poster: recent.coverUrl },
+    { id: recent.id, title: recent.title, poster: recent.coverUrl, source: recent.source },
     cfg,
     args,
     { chapterIndex: recent.lastChapterIndex, page: recent.lastPage },
@@ -580,7 +664,7 @@ async function historyFlow(cfg: Config, args: Args): Promise<void> {
   });
   if (!picked) return;
   const h = picked.entry;
-  await openManga({ id: h.id, title: h.title, poster: h.coverUrl }, cfg, args, {
+  await openManga({ id: h.id, title: h.title, poster: h.coverUrl, source: h.source }, cfg, args, {
     chapterIndex: h.lastChapterIndex,
     page: h.lastPage,
   });
@@ -588,7 +672,9 @@ async function historyFlow(cfg: Config, args: Args): Promise<void> {
 
 async function discoveryFlow(kind: DiscoveryKind, cfg: Config, args: Args): Promise<void> {
   const name = DISCOVERY_TITLES[kind];
-  const items = await withSpinner(`loading ${name} …`, () => getDiscovery(kind, 0, cfg.adult));
+  const { items, source } = await withSpinner(`loading ${name} …`, () =>
+    discoveryAny(kind, 0, cfg.adult),
+  );
   if (items.length === 0) {
     console.log(c.yellow(`Nothing in ${name} right now.`));
     return;
@@ -596,55 +682,47 @@ async function discoveryFlow(kind: DiscoveryKind, cfg: Config, args: Args): Prom
   const picks = items.map((it) => ({ label: discoveryLabel(it), previewUrl: it.poster, ref: it }));
   const picked = await fzfPick(picks, {
     prompt: `${name} ❯ `,
-    header: `${name} · ${items.length} titles`,
+    header: `${name} · ${items.length} titles${sourceTag(source)}`,
     preview: true,
   });
   if (!picked) return;
-  await openManga(
-    { id: picked.ref.id, title: picked.ref.title, poster: picked.ref.poster },
-    cfg,
-    args,
-  );
+  await openManga(refOf(picked.ref), cfg, args);
 }
 
 async function genreFlow(genreName: string, cfg: Config, args: Args): Promise<void> {
-  const filters = await withSpinner("loading genres …", () => getFilters());
+  const { filters, source } = await withSpinner("loading genres …", () => filtersAny());
   let genre = filters.genres.find((g) => g.name.toLowerCase() === genreName.trim().toLowerCase());
   if (!genre) {
     if (genreName.trim()) console.log(c.yellow(`Unknown genre “${genreName}”. Pick one:`));
     const picked = await fzfPick(
       filters.genres.map((g) => ({ label: c.bold(g.name), g })),
-      { prompt: "genre ❯ ", header: "pick a genre" },
+      { prompt: "genre ❯ ", header: `pick a genre${sourceTag(source)}` },
     );
     if (!picked) return;
     genre = picked.g;
   }
   const results = await withSpinner(`loading ${genre.name} …`, () =>
-    browseByFilter(`genreIds:=${genre!.id}`, { adult: cfg.adult }, "views:desc"),
+    getSource(source).browseGenre(genre!.id, cfg.adult),
   );
   if (results.length === 0) {
     console.log(c.yellow(`No manga found in ${genre.name}.`));
     return;
   }
-  const items = results.map((r) => ({ label: searchLabel(r), previewUrl: r.poster, ref: r }));
+  const items = results.map((r) => ({ label: searchLabel(r), previewUrl: r.poster, ref: { ...r, source } }));
   const picked = await fzfPick(items, {
     prompt: `${genre.name} ❯ `,
-    header: `${genre.name} · ${results.length} titles`,
+    header: `${genre.name} · ${results.length} titles${sourceTag(source)}`,
     preview: true,
   });
   if (!picked) return;
-  await openManga(
-    { id: picked.ref.id, title: picked.ref.title, poster: picked.ref.poster },
-    cfg,
-    args,
-  );
+  await openManga(refOf(picked.ref), cfg, args);
 }
 
 // ── download ──────────────────────────────────────────────────────────────────
 
 async function resolveManga(query: string, cfg: Config): Promise<MangaRef | null> {
-  const results = await withSpinner(`searching “${query}” …`, () =>
-    searchManga(query, { adult: cfg.adult }),
+  const { items: results, source } = await withSpinner(`searching “${query}” …`, () =>
+    searchAny(query, { adult: cfg.adult }),
   );
   if (results.length === 0) {
     console.log(c.yellow(`No results for “${query}”.`));
@@ -653,11 +731,11 @@ async function resolveManga(query: string, cfg: Config): Promise<MangaRef | null
   const items = results.map((r) => ({ label: searchLabel(r), previewUrl: r.poster, ref: r }));
   const picked = await fzfPick(items, {
     prompt: "manga ❯ ",
-    header: `${results.length} results — pick a title to download`,
+    header: `${results.length} results${sourceTag(source)} — pick a title`,
     preview: true,
   });
   if (!picked) return null;
-  return { id: picked.ref.id, title: picked.ref.title, poster: picked.ref.poster };
+  return refOf(picked.ref);
 }
 
 async function pickChaptersMulti(
@@ -688,7 +766,8 @@ async function downloadFlow(query: string, cfg: Config, args: Args): Promise<voi
   const ref = await resolveManga(q, cfg);
   if (!ref) return;
 
-  const info = await withSpinner(`loading ${ref.title} …`, () => getMangaInfo(ref.id));
+  const source = getSource(ref.source);
+  const info = await withSpinner(`loading ${ref.title} …`, () => source.info(ref.id));
   if (info.chapters.length === 0) {
     console.log(c.yellow("No downloadable chapters for this title."));
     return;
@@ -723,6 +802,7 @@ async function downloadFlow(query: string, cfg: Config, args: Args): Promise<voi
       const res = await downloadChapter(ref, ch, {
         format,
         downloadDir: dir,
+        loadPages: (cid) => source.pages(ref.id, cid),
         onProgress: (d, t) => sp.update(`${label}  ${c.dim(`${d}/${t}p`)}`),
       });
       if (res.skipped) {
@@ -752,8 +832,23 @@ function printWhere(cfg: Config): void {
       row("history", HISTORY_FILE),
       row("cache", CACHE_DIR),
       row("downloads", cfg.downloadDir),
+      row("source", `${cfg.source}${cfg.fallback.length ? c.dim(` → ${cfg.fallback.join(" → ")}`) : ""}`),
     ].join("\n"),
   );
+}
+
+function printSources(cfg: Config): void {
+  const lines = [c.bold("sources"), c.dim("───────")];
+  for (const s of allSources()) {
+    const active = s.id === cfg.source;
+    const mark = active ? c.green("● ") : s.available ? c.cyan("○ ") : c.red("✗ ");
+    const note = !s.available ? c.red("  unavailable") : active ? c.green("  primary") : "";
+    lines.push(`  ${mark}${c.bold(s.id.padEnd(12))} ${c.dim(s.label)}${note}`);
+  }
+  const chainStr = [cfg.source, ...cfg.fallback.filter((f) => f !== cfg.source)].join(" → ");
+  lines.push("", c.dim(`  fallback chain: ${chainStr}`));
+  lines.push(c.dim(`  set with --source <id>, or "source"/"fallback" in config.json`));
+  console.log(lines.join("\n"));
 }
 
 // ── recommendations (more like this) ──────────────────────────────────────────
@@ -764,7 +859,7 @@ async function recommendedFlow(query: string, cfg: Config, args: Args): Promise<
     seed = await resolveManga(query.trim(), cfg);
   } else {
     const recent = await mostRecent();
-    if (recent) seed = { id: recent.id, title: recent.title, poster: recent.coverUrl };
+    if (recent) seed = { id: recent.id, title: recent.title, poster: recent.coverUrl, source: recent.source };
     else {
       const q = (await prompt(c.violet("recommend based on ❯ "))).trim();
       if (!q) return;
@@ -773,12 +868,15 @@ async function recommendedFlow(query: string, cfg: Config, args: Args): Promise<
   }
   if (!seed) return;
 
-  let items = await withSpinner(`finding titles like ${seed.title} …`, () =>
-    getRelated(seed!.id, "mangaRecommendations", 0, cfg.adult),
+  const source = getSource(seed.source);
+  const items = await withSpinner(`finding titles like ${seed.title} …`, () =>
+    source.related(seed!.id, 0, cfg.adult),
   );
-  if (items.length === 0) items = await getRelated(seed.id, "mangaSimilar", 0, cfg.adult);
   if (items.length === 0) {
-    console.log(c.yellow(`No recommendations for ${seed.title} yet.`));
+    console.log(
+      c.yellow(`No recommendations for ${seed.title}`) +
+        (source.id === "mangadex" ? c.dim(" (MangaDex has no similar-titles API)") : ""),
+    );
     return;
   }
   const picks = items.map((it) => ({ label: discoveryLabel(it), previewUrl: it.poster, ref: it }));
@@ -788,7 +886,7 @@ async function recommendedFlow(query: string, cfg: Config, args: Args): Promise<
     preview: true,
   });
   if (!picked) return;
-  await openManga({ id: picked.ref.id, title: picked.ref.title, poster: picked.ref.poster }, cfg, args);
+  await openManga(refOf(picked.ref), cfg, args);
 }
 
 // ── follows + updates ──────────────────────────────────────────────────────────
@@ -801,11 +899,12 @@ async function followFlow(query: string, cfg: Config): Promise<void> {
   }
   const ref = await resolveManga(q, cfg);
   if (!ref) return;
-  const info = await withSpinner(`loading ${ref.title} …`, () => getMangaInfo(ref.id));
+  const info = await withSpinner(`loading ${ref.title} …`, () => getSource(ref.source).info(ref.id));
   const title = info.title || ref.title;
   await addFollow({
     id: ref.id,
     title,
+    source: ref.source,
     coverUrl: ref.poster,
     chapterCount: info.chapters.length,
     followedAt: new Date().toISOString(),
@@ -827,7 +926,7 @@ async function updatesFlow(cfg: Config, args: Args): Promise<void> {
     Promise.all(
       follows.map(async (f) => {
         try {
-          const info = await getMangaInfo(f.id);
+          const info = await getSource(f.source).info(f.id);
           return { f, count: info.chapters.length };
         } catch {
           return { f, count: f.chapterCount };
@@ -856,7 +955,7 @@ async function updatesFlow(cfg: Config, args: Args): Promise<void> {
   if (!picked) return;
   const { f, count, delta } = picked.row;
   const resume = delta > 0 ? { chapterIndex: Math.min(f.chapterCount, count - 1), page: 0 } : undefined;
-  await openManga({ id: f.id, title: f.title, poster: f.coverUrl }, cfg, args, resume);
+  await openManga({ id: f.id, title: f.title, poster: f.coverUrl, source: f.source }, cfg, args, resume);
   await markSeen(f.id, count);
 }
 
@@ -949,6 +1048,87 @@ async function statsFlow(): Promise<void> {
   console.log(out.join("\n"));
 }
 
+// ── nyaa magnet downloads ──────────────────────────────────────────────────────
+
+async function confirm(label: string): Promise<boolean> {
+  const a = (await prompt(label)).trim().toLowerCase();
+  return a === "y" || a === "yes";
+}
+
+/** Gate torrenting behind a VPN check. Returns true if it's OK to proceed. */
+async function ensureVpn(args: Args): Promise<boolean> {
+  if (args.noVpnCheck) return true;
+  const v = await withSpinner("checking your VPN …", () => checkVpn());
+  if (!v) {
+    return confirm(c.yellow("⚠  Couldn't verify your IP. Continue without a VPN check? [y/N] "));
+  }
+  if (v.likelyVpn) {
+    console.log(c.green("✓ VPN looks ON") + c.dim(`  — ${v.ip} · ${v.org || v.isp} · ${v.country}`));
+    return true;
+  }
+  console.log(c.red("⚠  VPN appears to be OFF") + c.dim(`  — ${v.ip} · ${v.isp} · ${v.country} (residential ISP)`));
+  console.log(c.yellow("   Torrenting without a VPN exposes your real IP to peers. Turn your VPN on first."));
+  return confirm(c.bold("   Download anyway? [y/N] "));
+}
+
+async function nyaaFlow(query: string, cfg: Config, args: Args): Promise<void> {
+  let q = query.trim();
+  if (!q) {
+    q = (await prompt(c.violet("nyaa search ❯ "))).trim();
+    if (!q) return;
+  }
+
+  let dump = args.dump;
+  if (!dump) {
+    const picked = await fzfPick(
+      DUMP_TYPES.map((d) => ({ label: `${c.bold(d.label)}   ${c.dim("nyaa c=" + d.cat)}`, d })),
+      { prompt: "dump type ❯ ", header: "which manga dump? (Literature only — never anime)" },
+    );
+    if (!picked) return;
+    dump = picked.d.id;
+  }
+
+  const items = await withSpinner(`searching nyaa “${q}” …`, () => searchNyaa(q, dump!));
+  if (items.length === 0) {
+    console.log(c.yellow(`No ${dump} torrents for “${q}”.`));
+    return;
+  }
+  const picks = items.map((it) => ({
+    label:
+      `${c.green(`▲${it.seeders}`)} ${c.gray(`▼${it.leechers}`)}  ${c.cyan(it.size.padStart(9))}  ` +
+      `${c.bold(it.title)}   ${c.dim(it.category.replace("Literature - ", ""))}`,
+    it,
+  }));
+  const chosen = await fzfPickMulti(picks, {
+    prompt: "torrent ❯ ",
+    header: `${items.length} results · Tab to multi-select · ⚠ magnet download`,
+  });
+  if (chosen.length === 0) return;
+
+  console.log(c.dim(`\n⚠  About to magnet-download ${chosen.length} torrent(s) with aria2c.`));
+  if (!(await ensureVpn(args))) {
+    console.log(c.dim("aborted."));
+    return;
+  }
+
+  const dir = args.out ? expandTilde(args.out) : join(cfg.downloadDir, "nyaa");
+  let ok = 0;
+  for (const { it } of chosen) {
+    console.log("\n" + c.bold(`↓ ${it.title}`) + c.dim(`  (${it.size}, ▲${it.seeders})`));
+    try {
+      if (await downloadMagnet(it.magnet, dir)) {
+        ok++;
+        console.log(c.green(`✓ done → ${dir}`));
+      } else {
+        console.log(c.red("✗ aria2c exited with an error"));
+      }
+    } catch (err) {
+      console.log(c.red(`✗ ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+  console.log("\n" + c.bold(`Done`) + c.dim(` — ${ok}/${chosen.length} downloaded to ${dir}`));
+}
+
 // ── entrypoint ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -963,9 +1143,21 @@ async function main(): Promise<void> {
   if (args.adult) cfg.adult = true;
   if (args.dual !== undefined) cfg.dualPage = args.dual;
   if (args.direction) cfg.direction = args.direction;
+  if (args.source) cfg.source = args.source;
+
+  // Configure the source chain: chosen primary, then the rest as fallbacks.
+  const fallback = cfg.fallback.filter((s) => s !== cfg.source);
+  configureSources(cfg.source, fallback);
+  const primarySrc = getSource(cfg.source);
+  if (!primarySrc.available) {
+    console.error(
+      c.yellow(`⚠  ${primarySrc.label} is blocked — falling back to ${fallback.join(" → ") || "nothing"}.`),
+    );
+  }
 
   if (args.command === "where") return printWhere(cfg);
   if (args.command === "stats") return statsFlow();
+  if (args.command === "sources") return printSources(cfg);
 
   await ensureDeps(["fzf", "chafa"]);
 
@@ -1000,6 +1192,8 @@ async function main(): Promise<void> {
       return updatesFlow(cfg, args);
     case "library":
       return libraryFlow(cfg, args);
+    case "nyaa":
+      return nyaaFlow(args.query ?? "", cfg, args);
   }
 }
 

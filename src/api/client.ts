@@ -23,26 +23,57 @@ export class ApiError extends Error {
   }
 }
 
-function baseHeaders(): Record<string, string> {
-  return {
-    "User-Agent": UA,
-    Referer: ORIGIN + "/",
-    Accept: "application/json, text/plain, */*",
-  };
-}
-
-async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  init?: RequestInit,
+  timeoutMs: number = TIMEOUT_MS,
+): Promise<Response> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     return await fetch(url, {
       ...init,
-      headers: { ...baseHeaders(), ...(init?.headers as Record<string, string> | undefined) },
+      headers: {
+        "User-Agent": UA,
+        Accept: "application/json, text/plain, */*",
+        ...(init?.headers as Record<string, string> | undefined),
+      },
       signal: ctrl.signal,
     });
   } finally {
     clearTimeout(timer);
   }
+}
+
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin + "/";
+  } catch {
+    return ORIGIN + "/";
+  }
+}
+
+/**
+ * Generic GET → JSON for source adapters (MangaDex etc). `url` must already carry
+ * its query string (sources that need repeated/bracket params build it themselves).
+ */
+export async function httpJson<T>(
+  url: string,
+  opts: { headers?: Record<string, string>; timeoutMs?: number } = {},
+): Promise<T> {
+  if (debugEnabled()) console.error(`[api] GET ${url}`);
+  await jitter();
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(url, { headers: opts.headers }, opts.timeoutMs);
+  } catch (e) {
+    throw new ApiError(`Could not reach ${originOf(url)} (${e instanceof Error ? e.message : String(e)})`);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new ApiError(`Request failed (HTTP ${res.status})${body ? ": " + body.slice(0, 160) : ""}`, res.status);
+  }
+  return (await res.json()) as T;
 }
 
 // A little jitter so we never hammer the origin in a tight loop.
@@ -70,7 +101,7 @@ export async function apiGet<T>(
 
   let res: Response;
   try {
-    res = await fetchWithTimeout(url.toString());
+    res = await fetchWithTimeout(url.toString(), { headers: { Referer: ORIGIN + "/" } });
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     throw new ApiError(`${NETWORK_HINT} (${reason})`);
@@ -85,12 +116,29 @@ export async function apiGet<T>(
   return (await res.json()) as T;
 }
 
+/** Generic GET → text, for HTML/RSS sources (weebcentral, nyaa). */
+export async function httpText(
+  url: string,
+  opts: { headers?: Record<string, string>; timeoutMs?: number } = {},
+): Promise<string> {
+  if (debugEnabled()) console.error(`[api] GET ${url}`);
+  await jitter();
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(url, { headers: opts.headers }, opts.timeoutMs);
+  } catch (e) {
+    throw new ApiError(`Could not reach ${originOf(url)} (${e instanceof Error ? e.message : String(e)})`);
+  }
+  if (!res.ok) throw new ApiError(`Request failed (HTTP ${res.status})`, res.status);
+  return res.text();
+}
+
 /** Fetch a binary asset (image). Returns null on any failure (caller shows a placeholder). */
 export async function fetchBinary(url: string): Promise<ArrayBuffer | null> {
   const abs = resolveAssetUrl(url);
   if (debugEnabled()) console.error(`[api] IMG ${abs}`);
   try {
-    const res = await fetchWithTimeout(abs);
+    const res = await fetchWithTimeout(abs, { headers: { Referer: originOf(abs) } });
     if (!res.ok) return null;
     return await res.arrayBuffer();
   } catch {
