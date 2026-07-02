@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/api"
+	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/img"
+	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/reader"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/ui"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/util"
 )
@@ -41,6 +43,8 @@ func main() {
 		cmdSources(cfg)
 	case "search":
 		cmdSearch(strings.Join(args[1:], " "), cfg)
+	case "continue", "-c":
+		cmdContinue(cfg)
 	case "info":
 		need(args, 3, "info <source> <mangaId>")
 		cmdInfo(api.SourceID(args[1]), args[2])
@@ -69,8 +73,44 @@ func need(args []string, n int, use string) {
 }
 
 func fail(err error) {
+	ui.Restore()
 	fmt.Fprintln(os.Stderr, "✗ "+err.Error())
 	os.Exit(1)
+}
+
+// openReader runs a reader session with the config's defaults.
+func openReader(cfg util.Config, ref api.MangaRef, info *api.MangaInfo, chIdx, page int) reader.Action {
+	act, err := reader.Run(&reader.Context{
+		Manga: ref, Info: info, StartChapter: chIdx, StartPage: page,
+		Protocol:  img.DetectProtocol(cfg.ReaderMode),
+		Direction: cfg.Direction, DualPage: cfg.DualPage, Fit: cfg.Fit,
+		Zoom: cfg.Zoom, HudReserve: cfg.HudReserve, Prefetch: cfg.PrefetchPages,
+		Webtoon: info.ForceStrip,
+	})
+	if err != nil {
+		fail(err)
+	}
+	if act == reader.ActMenu {
+		fmt.Println(ui.Dim("(the main menu arrives in phase 5)"))
+	}
+	return act
+}
+
+func cmdContinue(cfg util.Config) {
+	h := util.MostRecent()
+	if h == nil {
+		fmt.Println("No reading history yet — search for something first.")
+		return
+	}
+	fmt.Printf("%s %s %s\n", ui.Dim("resuming"), ui.Bold(h.Title),
+		ui.Dim(fmt.Sprintf("— Ch.%v · p.%d", h.LastChapterNumber, h.LastPage+1)))
+	src := api.SourceID(h.Source)
+	info, err := api.Get(src).Info(h.ID)
+	if err != nil {
+		fail(err)
+	}
+	ref := api.MangaRef{ID: h.ID, Title: h.Title, Poster: h.CoverURL, Source: src}
+	openReader(cfg, ref, info, h.LastChapterIndex, h.LastPage)
 }
 
 func cmdSources(cfg util.Config) {
@@ -157,19 +197,24 @@ func cmdSearch(query string, cfg util.Config) {
 		for i, ch := range info.Chapters {
 			chItems[len(info.Chapters)-1-i] = ui.PickItem{Label: chapterLabel(ch)} // newest first
 		}
-		cidx, err := ui.Pick(chItems, ui.PickOpts{
-			Prompt: "chapter ❯ ",
-			Header: fmt.Sprintf("%s — %d chapters", info.Title, len(info.Chapters)),
-		})
-		if err != nil {
-			fail(err)
+		// Chapter-pick → read loop ("j" in the reader returns here).
+		for {
+			cidx, err := ui.Pick(chItems, ui.PickOpts{
+				Prompt: "chapter ❯ ",
+				Header: fmt.Sprintf("%s — %d chapters", info.Title, len(info.Chapters)),
+			})
+			if err != nil {
+				fail(err)
+			}
+			if cidx < 0 {
+				return
+			}
+			act := openReader(cfg, api.MangaRef{ID: r.ID, Title: info.Title, Poster: r.Poster, Source: r.Source},
+				info, len(info.Chapters)-1-cidx, 0)
+			if act != reader.ActJump {
+				return
+			}
 		}
-		if cidx < 0 {
-			return
-		}
-		ch := info.Chapters[len(info.Chapters)-1-cidx]
-		fmt.Printf("picked %s · Ch.%v %s\n", info.Title, ch.Number, ui.Dim("(the reader arrives in phase 3)"))
-		return
 	}
 	// Headless: plain listing.
 	fmt.Printf("%d results via %s\n", len(results), source)
