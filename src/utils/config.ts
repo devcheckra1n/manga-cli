@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { CONFIG_FILE, CONFIG_DIR, expandTilde } from "./paths.ts";
 import type { SourceId } from "../api/types.ts";
 
-const SOURCE_IDS: readonly SourceId[] = ["atsumaru", "mangadex", "weebcentral", "mangadot"];
+export const SOURCE_IDS: readonly SourceId[] = ["atsumaru", "weebcentral", "mangakatana", "mangadex"];
 export function isSourceId(s: string): s is SourceId {
   return (SOURCE_IDS as readonly string[]).includes(s);
 }
@@ -49,11 +49,15 @@ export interface Config {
   adult: boolean;
   fzfArgs: string;
   downloadDir: string;
+  /** MyAnimeList API client id (from https://myanimelist.net/apiconfig). */
+  malClientId: string;
+  /** MyAnimeList API client secret (used in the OAuth token exchange). */
+  malClientSecret: string;
 }
 
 export const DEFAULT_CONFIG: Config = {
   source: "atsumaru",
-  fallback: ["weebcentral", "mangadex", "mangadot"],
+  fallback: ["weebcentral", "mangakatana", "mangadex"],
   readerMode: "auto",
   direction: "rtl",
   dualPage: false,
@@ -67,6 +71,8 @@ export const DEFAULT_CONFIG: Config = {
   adult: false,
   fzfArgs: "",
   downloadDir: join(homedir(), "Downloads", "manga-cli"),
+  malClientId: "",
+  malClientSecret: "",
 };
 
 function clampZoom(z: number): number {
@@ -79,14 +85,18 @@ let cached: Config | null = null;
 export async function loadConfig(): Promise<Config> {
   if (cached) return cached;
   let merged: Config = { ...DEFAULT_CONFIG };
-  try {
-    const file = Bun.file(CONFIG_FILE);
-    if (await file.exists()) {
+  const file = Bun.file(CONFIG_FILE);
+  if (await file.exists().catch(() => false)) {
+    try {
       const data = (await file.json()) as Partial<Config>;
       merged = { ...DEFAULT_CONFIG, ...data };
+    } catch (e) {
+      // Don't silently ignore the user's whole config — tell them it's broken.
+      console.error(
+        `⚠  ${CONFIG_FILE} is not valid JSON — using defaults and ignoring ALL your settings.\n` +
+          `   (${e instanceof Error ? e.message : String(e)}) — it must be a single { … } object with no comments.`,
+      );
     }
-  } catch {
-    // Malformed config → fall back to defaults rather than crashing.
   }
   merged.downloadDir = expandTilde(merged.downloadDir);
   if (!isSourceId(merged.source)) merged.source = "atsumaru";

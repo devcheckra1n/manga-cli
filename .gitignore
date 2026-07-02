@@ -4,3 +4,4 @@ bun.lockb
 *.log
 .DS_Store
 scratchpad/
+briefing.md

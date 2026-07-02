@@ -6,7 +6,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { getChapterPages } from "../api/chapter.ts";
-import type { MangaInfo, MangaRef, Page, ReadChapter } from "../api/types.ts";
+import type { Chapter, MangaInfo, MangaRef, Page, ReadChapter } from "../api/types.ts";
 import type { Direction, FitMode } from "../utils/config.ts";
 import { cacheImage } from "../utils/image.ts";
 import { recordHistory } from "../utils/history.ts";
@@ -14,13 +14,10 @@ import { isFollowed, toggleFollow } from "../utils/follows.ts";
 import { PAGES_DIR } from "../utils/paths.ts";
 import { c } from "./colors.ts";
 import { chafaFormat, termSize, type ImageProtocol } from "./protocol.ts";
+import { enterAltScreen, leaveAltScreen } from "./term.ts";
 
 const ESC = "\x1b";
 const CLEAR = `${ESC}[2J${ESC}[H`;
-const HIDE_CURSOR = `${ESC}[?25l`;
-const SHOW_CURSOR = `${ESC}[?25h`;
-const ALT_ON = `${ESC}[?1049h`;
-const ALT_OFF = `${ESC}[?1049l`;
 const KITTY_DELETE_ALL = `${ESC}_Ga=d,d=A${ESC}\\`; // clear all kitty images (anti-ghosting)
 
 export interface ReaderContext {
@@ -45,7 +42,7 @@ export interface ReaderContext {
   loadChapter?: (chapterIndex: number) => Promise<ReadChapter>;
 }
 
-export type ReaderResult = { action: "quit" } | { action: "jump" };
+export type ReaderResult = { action: "quit" } | { action: "jump" } | { action: "menu" };
 
 type KeyAction =
   | "next"
@@ -64,6 +61,7 @@ type KeyAction =
   | "zoomReset"
   | "rerender"
   | "jump"
+  | "menu"
   | "save"
   | "gotoPage"
   | "help"
@@ -98,8 +96,10 @@ function mapKey(raw: string, rtl: boolean): KeyAction | null {
       return "lastPage";
     case "d":
       return "toggleDual";
-    case "m":
+    case "t":
       return "toggleDirection";
+    case "m":
+      return "menu";
     case "f":
       return "toggleFit";
     case "w":
@@ -212,11 +212,24 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
     return direction === "rtl";
   }
 
+  function drawLoading(ch: Chapter): void {
+    const { cols, rows } = termSize();
+    const name = ch.title && ch.title !== `Chapter ${ch.number}` ? ch.title : `Chapter ${ch.number}`;
+    const t1 = manga.title.length > cols - 4 ? manga.title.slice(0, Math.max(1, cols - 5)) + "…" : manga.title;
+    const t2 = `${name} · loading …`;
+    const row = Math.max(1, Math.floor(rows / 2) - 1);
+    const col1 = Math.max(1, Math.floor((cols - t1.length) / 2) + 1);
+    const col2 = Math.max(1, Math.floor((cols - t2.length) / 2) + 1);
+    process.stdout.write(
+      CLEAR + `${ESC}[${row};${col1}H` + c.bold(c.violet(t1)) + `${ESC}[${row + 2};${col2}H` + c.dim(t2),
+    );
+  }
+
   async function loadChapterPages(idx: number): Promise<ReadChapter> {
     const ch = info.chapters[idx];
     if (!ch) throw new Error("Invalid chapter index");
     if (protocol === "kitty") process.stdout.write(KITTY_DELETE_ALL);
-    process.stdout.write(CLEAR + c.dim(`  loading ${ch.title} …`));
+    drawLoading(ch);
     return ctx.loadChapter ? ctx.loadChapter(idx) : getChapterPages(manga.id, ch.id);
   }
 
@@ -389,7 +402,7 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
       buf += `${ESC}[${r + 1};${col1}H` + ln;
     }
     process.stdout.write(buf);
-    drawHud(flash, lines.length);
+    drawHud(flash);
   }
 
   // ── shared HUD / notices ────────────────────────────────────────────────────
@@ -401,44 +414,60 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
     process.stdout.write(`${ESC}[${row};${col}H` + color(msg));
   }
 
-  function drawHud(flash?: string, stripLines?: number): void {
+  function drawHud(flash?: string): void {
     const { cols, rows } = termSize();
     const ch = info.chapters[chapterIndex];
     if (!ch) return;
     const total = chapter.pages.length;
 
-    let leftPlain: string;
-    let modeFlags: string;
+    // Position, mode flags and chapter progress (the scrubber fraction).
+    let pos: string;
+    let flags: string;
+    let frac: number;
     if (webtoon) {
-      const pct = webtoonMax > 0 ? Math.round((scrollOff / webtoonMax) * 100) : 100;
-      leftPlain = ` p${pageIndex + 1}/${total} `;
-      modeFlags = `strip ${pct}%${zoom !== 1 ? ` · ${Math.round(zoom * 100)}%` : ""}`;
-      void stripLines;
+      const scroll = webtoonMax > 0 ? scrollOff / webtoonMax : 1;
+      frac = total > 0 ? Math.min(1, (pageIndex + scroll) / total) : 1;
+      pos = `p${pageIndex + 1}/${total}`;
+      flags = `strip ${Math.round(frac * 100)}%`;
+      if (zoom !== 1) flags += ` · ${Math.round(zoom * 100)}%`;
     } else {
+      frac = total > 1 ? Math.min(1, pageIndex / (total - 1)) : 1;
       const span =
-        dual && pageIndex + 1 < total ? `${pageIndex + 1}-${pageIndex + 2}` : `${Math.min(pageIndex + 1, total)}`;
-      leftPlain = ` ${span}/${total} `;
-      modeFlags = `${rtl() ? "rtl" : "ltr"}${dual ? " · 2p" : ""}${zoom !== 1 ? ` · ${Math.round(zoom * 100)}%` : ""}`;
+        dual && pageIndex + 1 < total ? `${pageIndex + 1}·${pageIndex + 2}` : `${Math.min(pageIndex + 1, total)}`;
+      pos = `${span}/${total}`;
+      flags = rtl() ? "rtl" : "ltr";
+      if (dual) flags += " · 2p";
+      if (fit === "width") flags += " · fit:w";
+      if (zoom !== 1) flags += ` · ${Math.round(zoom * 100)}%`;
     }
 
-    const heart = followed ? c.pink("♥ ") : "";
+    const leftPlain = ` ${pos} `;
+    const heartPlain = followed ? "♥ " : "";
     let midPlain =
-      ch.title && ch.title !== `Chapter ${ch.number}`
-        ? `Ch.${ch.number} · ${ch.title}  [${modeFlags}]`
-        : `Ch.${ch.number}  [${modeFlags}]`;
-    const help = webtoon
-      ? "↑↓ scroll · : page · ] chapter · w pages · q quit"
-      : "n/p move · : page · d 2p · b follow · ? help · q quit";
-    const rightPlain = ` ${flash ?? help} `;
+      ch.title && ch.title !== `Chapter ${ch.number}` ? `Ch.${ch.number} · ${ch.title}` : `Ch.${ch.number}`;
+    const rightPlain = ` ${flash ?? `${flags} · ? help`} `;
 
-    const fixed = leftPlain.length + rightPlain.length + 4 + (followed ? 2 : 0);
-    if (midPlain.length > cols - fixed) midPlain = midPlain.slice(0, Math.max(0, cols - fixed - 1)) + "…";
-    const used = leftPlain.length + 1 + 2 + (followed ? 2 : 0) + midPlain.length + 1 + rightPlain.length;
-    const sep = "─".repeat(Math.max(1, cols - used));
+    // Segments: [left] [heart+mid] [scrubber] [right], single spaces between.
+    // Truncate the title before squeezing the scrubber below its minimum.
+    const MIN_BAR = 6;
+    const fixed = leftPlain.length + heartPlain.length + rightPlain.length + 3;
+    const maxMid = cols - fixed - MIN_BAR;
+    if (midPlain.length > maxMid) midPlain = midPlain.slice(0, Math.max(0, maxMid - 1)) + "…";
+    const barW = Math.max(MIN_BAR, cols - fixed - midPlain.length);
 
-    const right = flash ? c.green(rightPlain) : c.dim(rightPlain);
+    // A slim scrubber: read progress ━━━╸ over the remaining track ───.
+    const knob = Math.max(0, Math.min(barW - 1, Math.round(frac * (barW - 1))));
+    const bar = c.cyan("━".repeat(knob) + "╸") + c.dim("─".repeat(barW - knob - 1));
+
     const line =
-      c.bold(c.violet(leftPlain)) + " " + heart + c.cyan(midPlain) + " " + c.dim(sep) + " " + right;
+      c.bold(c.violet(leftPlain)) +
+      " " +
+      (heartPlain ? c.pink(heartPlain) : "") +
+      c.cyan(midPlain) +
+      " " +
+      bar +
+      " " +
+      (flash ? c.green(rightPlain) : c.dim(rightPlain));
     process.stdout.write(`${ESC}[${rows};1H${ESC}[2K` + line);
   }
 
@@ -455,37 +484,47 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
   }
 
   function drawHelp(): void {
-    const lines = [
-      "  manga-cli reader",
-      "  ────────────────",
-      `  mode: ${webtoon ? "long-strip (webtoon)" : rtl() ? "right-to-left (manga)" : "left-to-right"}`,
-      "",
-      webtoon ? "  ↑ ↓ / space     scroll the strip" : "  → ←             turn page (direction-aware)",
-      "  n / p           next / previous page",
-      "  ] / [           next / previous chapter",
-      "  g / G           first / last page",
-      "  : (or #)        go to page — type a number, Enter",
-      "  w               toggle long-strip (webtoon) mode",
-      "  d               toggle dual-page spread",
-      "  m               toggle reading direction",
-      "  f               toggle fit (whole page / fill width)",
-      "  + / - / 0       zoom in / out / reset",
-      "  b               follow / unfollow this series",
-      "  s               save current page",
-      "  r               re-render (after a resize)",
-      "  j               back to chapter list",
-      "  q / esc         quit",
-      "",
-      "  press any key …",
+    const mode = webtoon ? "long-strip" : rtl() ? "right-to-left" : "left-to-right";
+    const keys: Array<[string, string]> = [
+      [webtoon ? "↑ ↓ / space" : "→ ← / space", webtoon ? "scroll the strip" : "turn page (direction-aware)"],
+      ["n / p", "next / previous page"],
+      ["] / [", "next / previous chapter"],
+      ["g / G", "first / last page"],
+      [": or #", "go to page — type a number, Enter"],
+      ["w", "toggle long-strip (webtoon) mode"],
+      ["d", "toggle dual-page spread"],
+      ["t", "toggle reading direction"],
+      ["f", "toggle fit (whole page / fill width)"],
+      ["+ - 0", "zoom in / out / reset"],
+      ["b", "follow / unfollow this series"],
+      ["s", "save current page"],
+      ["r", "re-render (after a resize)"],
+      ["j", "back to the chapter list"],
+      ["m", "back to the main menu"],
+      ["q / esc", "quit the reader"],
     ];
+    const keyW = Math.max(...keys.map(([k]) => k.length));
+    const descW = Math.max(...keys.map(([, d]) => d.length));
+    const innerW = 2 + keyW + 3 + descW + 2;
+
+    const label = ` reader · ${mode} `;
+    const foot = ` any key to close `;
+    const box: string[] = [
+      c.dim("╭─╴") + c.violet(label) + c.dim("╶" + "─".repeat(Math.max(0, innerW - label.length - 3)) + "╮"),
+      ...keys.map(
+        ([k, d]) =>
+          c.dim("│") + "  " + c.bold(c.cyan(k.padEnd(keyW))) + "   " + d.padEnd(descW) + "  " + c.dim("│"),
+      ),
+      c.dim("╰─╴" + foot + "╶" + "─".repeat(Math.max(0, innerW - foot.length - 3)) + "╯"),
+    ];
+
     const { cols, rows } = termSize();
-    const startRow = Math.max(1, Math.floor((rows - lines.length) / 2));
-    const width = Math.max(...lines.map((l) => l.length));
-    const startCol = Math.max(1, Math.floor((cols - width) / 2));
+    const startRow = Math.max(1, Math.floor((rows - box.length) / 2));
+    const startCol = Math.max(1, Math.floor((cols - (innerW + 2)) / 2));
     if (protocol === "kitty") process.stdout.write(KITTY_DELETE_ALL);
     process.stdout.write(CLEAR);
-    lines.forEach((l, i) => {
-      process.stdout.write(`${ESC}[${startRow + i};${startCol}H` + c.cyan(l));
+    box.forEach((l, i) => {
+      process.stdout.write(`${ESC}[${startRow + i};${startCol}H` + l);
     });
   }
 
@@ -520,7 +559,7 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
   }
 
   // ── main loop ──────────────────────────────────────────────────────────────
-  process.stdout.write(ALT_ON + HIDE_CURSOR);
+  enterAltScreen();
   const keys = keyStream();
   let result: ReaderResult = { action: "quit" };
 
@@ -569,6 +608,10 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
       }
       if (action === "jump") {
         result = { action: "jump" };
+        break;
+      }
+      if (action === "menu") {
+        result = { action: "menu" };
         break;
       }
       if (action === "gotoPage") {
@@ -740,7 +783,7 @@ export async function runReader(ctx: ReaderContext): Promise<ReaderResult> {
   } finally {
     await keys.return(undefined);
     if (protocol === "kitty") process.stdout.write(KITTY_DELETE_ALL);
-    process.stdout.write(SHOW_CURSOR + ALT_OFF);
+    leaveAltScreen();
   }
 
   return result;

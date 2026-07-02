@@ -1,8 +1,9 @@
 # manga-cli
 
-A fast, lightweight **terminal manga reader** for [atsu.moe](https://atsu.moe) —
+A fast, beautiful **terminal manga reader & downloader** —
 [ani-cli](https://github.com/pystardust/ani-cli) energy, but for manga, and prettier.
-Search, browse, and read manga inline in your terminal with real image rendering.
+Search, browse, and read manga inline in your terminal with real image rendering,
+across four sources with automatic fallback.
 
 ```
  ███╗   ███╗ █████╗ ███╗   ██╗ ██████╗  █████╗
@@ -13,7 +14,7 @@ Search, browse, and read manga inline in your terminal with real image rendering
  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝
           ██████╗██╗     ██╗
          ██╔════╝██║     ██║
-         ╚██████╗███████╗██║   terminal manga reader · atsu.moe
+         ╚██████╗███████╗██║   terminal manga reader 🎲
           ╚═════╝╚══════╝╚═╝
 ```
 
@@ -32,8 +33,18 @@ Search, browse, and read manga inline in your terminal with real image rendering
 - ❤️ **Follow series** and see new-chapter **updates** at a glance
 - ✨ **Recommendations** — "more like this" for any title
 - 📊 **Reading stats** — your manga "wrapped", all local
-- 🔀 **Multiple sources with fallback** — atsu.moe primary, **Weeb Central** + **MangaDex**
-  backups; if one's down it transparently routes to the next
+- 🔀 **Multiple sources with fallback** — atsu.moe primary, **Weeb Central**, **MangaKatana**,
+  **MangaDex** backups; if one's down it routes to the next (and remembers it's down so
+  you don't wait on the timeout again)
+- 📶 **Connection-aware** — a quick connectivity probe makes sure *bad wifi* never gets a
+  healthy source flagged as down
+- 🎛️ **Main menu** — bare `manga-cli` opens a one-keystroke picker for everything
+- 🎲 **Random manga** — `manga-cli -R` rolls one and starts reading
+- 🕹️ **MANGAVANIA** — a built-in Castlevania-flavored zombie minigame (`manga-cli game`)
+  for when the wifi is truly dead — Ridge Racer rules
+- 🔎 **Filtered browse** — by genre, status, and sort order
+- 🔄 **Sync** — auto-download new chapters for every series you follow
+- 📊 **MyAnimeList tracking** — your reading progress syncs to MAL as you read
 - 🧲 **Torrent dumps via nyaa.si** — grab full-volume manga with `aria2c` (with a VPN check)
 - ⚡ **Feels instant** — aggressive disk caching + background page prefetch
 - 📖 **Reading history** with `--continue` to pick up exactly where you left off
@@ -92,18 +103,25 @@ manga-cli [flags] [query]
   -t, --trending          show trending manga
   -p, --popular           show popular manga
   -l, --latest            show latest updates
+  -R, --random            🎲 roll a random manga and start reading
   -g, --genre <genre>     browse by genre
+      browse              filtered browse — genre + status + sort
   -r, --recommended [q]   "more like this" — recommendations for a title
       --follow [query]    follow a series for new-chapter updates
   -u, --updates           show followed series that have new chapters
+      sync                download new chapters for everything you follow
+      mal [sub]           MyAnimeList tracking: login · status · logout
       --library           browse & read your downloads offline
       --stats             your reading stats / "wrapped"
   -d, --download <query>  download chapters (CBZ / ZIP / PDF / images)
   -f, --format <fmt>      download format: cbz · zip · pdf · images
       --chapters <spec>   pick chapters non-interactively: 1-10 · 1,3,5 · all · latest
       --out <dir>         download into <dir> (overrides config)
-  -S, --source <id>       force a source: atsumaru · mangadex
-      sources             list sources & the fallback chain
+      nyaa [query]        manga torrents via nyaa.si + aria2c (--dump, --no-vpn-check)
+  -S, --source <id>       force a source: atsumaru · weebcentral · mangakatana · mangadex
+      sources [reset]     list sources & health — reset forgives recorded failures
+      config [sub]        view & change settings — interactive, or get · set · edit · path
+      game                🕹 MANGAVANIA — zombie-slaying minigame (needs zero internet)
       where               print config / cache / download paths
       --dual              open in two-page (spread) mode
       --webtoon           long-strip scroll mode (auto-detected for manhwa)
@@ -117,7 +135,14 @@ manga-cli [flags] [query]
   -h, --help, help        print help
 ```
 
-With no flags it shows the banner and drops into interactive search.
+With no arguments it opens the **main menu** — search, continue where you left off,
+roll a 🎲 random manga, trending, browse, updates, library, stats, and settings, all
+one keystroke away.
+
+**Navigation flows like an app:** anything you launch from the menu returns to the menu
+when it finishes, `Esc` backs out of any picker, and **`m`** inside the reader jumps
+straight back to the main menu — even if you started with `manga-cli <query>` from the
+shell.
 
 ```bash
 manga-cli berserk      # quick search
@@ -157,6 +182,8 @@ to see all paths.
 ```bash
 manga-cli --follow berserk    # follow a series (remembers the chapter count)
 manga-cli -u                  # which followed titles have new chapters (+N badges)
+manga-cli sync                # download new chapters for everything you follow
+manga-cli browse              # filtered browse: pick genre + status + sort
 manga-cli -r                  # recommendations based on your last read
 manga-cli -r "chainsaw man"   # "more like this" for a specific title
 manga-cli --library           # browse & read your downloads — fully offline
@@ -165,9 +192,29 @@ manga-cli --stats             # your reading "wrapped": streaks, top titles, wee
 
 - **Following is local** — no account needed. `--updates` re-checks followed titles and
   badges the ones with new chapters; press **`b`** in the reader to follow/unfollow.
+- **`sync`** is `--updates` + auto-download in one: it pulls every new chapter for your
+  follows into your library (handy in a cron job for a self-updating shelf).
+- **`browse`** filters across genre, status, and sort order, using whichever source has the
+  richest filters (atsu.moe or MangaDex).
 - **`--library`** reads downloaded CBZ/ZIP/folders back through the same reader, with
   zero network. (PDF downloads are for your viewer; the library reads image archives.)
 - **`--stats`** is computed entirely from your local history — nothing leaves your machine.
+
+## Tracking (MyAnimeList)
+
+manga-cli can update your **MyAnimeList** reading progress automatically as you read.
+
+```bash
+manga-cli mal login     # one-time browser auth
+manga-cli mal           # show link status
+manga-cli mal logout
+```
+
+One-time setup: create an API app at <https://myanimelist.net/apiconfig>, set its **App
+Redirect URL** to `http://localhost:8723/callback`, and put its **Client ID** and **Client
+Secret** in `~/.config/manga-cli/config.json` as `malClientId` and `malClientSecret` (or the
+`MAL_CLIENT_ID` / `MAL_CLIENT_SECRET` env vars). After `mal login`, finishing a chapter bumps
+your MAL progress for that title in the background.
 
 ## Sources
 
@@ -182,14 +229,20 @@ manga-cli -S mangadex one piece   # force a specific source for this run
 | Source | Status | Notes |
 |--------|--------|-------|
 | `atsumaru` | ✅ primary | atsu.moe — richest metadata & discovery feeds |
-| `weebcentral` | ✅ backup | weebcentral.com — huge, current scanlation library |
-| `mangadex` | ✅ backup | mangadex.org — open API (some titles delicensed) |
-| `mangadot` | ✖ unmapped | mangadot.net — SPA API not reverse-engineered yet |
+| `weebcentral` | ✅ backup 1 | weebcentral.com — huge, current scanlation library |
+| `mangakatana` | ✅ backup 2 | mangakatana.com — broad library incl. licensed titles |
+| `mangadex` | ✅ backup 3 | mangadex.org — open API (some titles delicensed) |
 
 If the primary source is down or returns nothing, the next source answers
 automatically — a manga then stays bound to whichever source found it (so chapters and
-pages always load from the right place). Set the primary with `-S/--source` or the
-`source` / `fallback` keys in config.
+pages always load from the right place). A failed source is also **remembered for ~5
+minutes** and skipped, so you don't wait out its network timeout on every command. Set the
+primary with `-S/--source` or the `source` / `fallback` keys in config.
+
+**Connection-aware:** before blaming a source, manga-cli runs a quick connectivity probe
+(the same captive-portal endpoints your OS uses). If *your* internet is down or flaky, the
+failure isn't recorded — so bad wifi never flags healthy sources as dead. If sources do get
+flagged and you want them back immediately: `manga-cli sources reset`.
 
 ```bash
 manga-cli -S weebcentral chainsaw man   # read from a specific source
@@ -223,6 +276,21 @@ If it looks like a residential ISP (i.e. **VPN off**), it warns and asks you to 
 Torrenting exposes your IP to peers — keep your VPN on. Requires `aria2c`
 (`brew install aria2`); downloads land in `<downloadDir>/nyaa/`.
 
+## 🕹️ MANGAVANIA (the minigame)
+
+Ridge Racer had Galaxian on its loading screen; manga-cli has **MANGAVANIA** — a tiny
+Castlevania-flavored arena brawler, rendered in pure ANSI, needing **zero internet**:
+
+```bash
+manga-cli game     # also: play · zombies — or pick 🕹️ from the main menu
+```
+
+`←` `→` move · `space` jump · `x` attack. Zombies take **3 hits** and crumble into bone
+piles that litter the arena. Slay 8 and the **GRAVELORD** rises (with a health bar and a
+nasty lunge) — cut him down for the win screen. 3 hearts, no continues, `r` to retry.
+When a command fails because *your* connection is down, manga-cli will help you cope by
+suggesting it.
+
 ## Long-strip (webtoon) mode
 
 Manhwa/manhua pages are single images thousands of pixels tall, so manga-cli has a
@@ -244,17 +312,18 @@ terminal.
 | `↑` · `↓` | scroll (in long-strip / webtoon mode) |
 | `w` | toggle long-strip (webtoon) scrolling |
 | `d` | toggle two-page spread |
-| `m` | toggle reading direction (RTL ⇄ LTR) |
+| `t` | toggle reading direction (RTL ⇄ LTR) |
 | `f` | toggle fit (whole page ⇄ fill width) |
 | `b` | follow / unfollow this series |
 | `+` · `-` · `0` | zoom in / out / reset |
 | `s` | save current page to your downloads dir |
 | `r` | re-render (after a terminal resize) |
 | `j` | back to the chapter list |
+| `m` | **back to the main menu** (works from any read) |
 | `?` | show keybindings |
 | `q` · `esc` | quit the reader |
 
-Reading is **right-to-left by default** (it's manga). Pass `--ltr` or press `m` for
+Reading is **right-to-left by default** (it's manga). Pass `--ltr` or press `t` for
 comics/webtoons. Toggle spreads live with `d` or start in spread mode with `--dual`.
 
 ## How it renders images
@@ -276,12 +345,23 @@ with `readerMode` in the config if you like.
 
 ## Configuration
 
-`~/.config/manga-cli/config.json` (XDG-aware; `$XDG_CONFIG_HOME` respected):
+The easiest way: **`manga-cli config`** — an interactive settings editor (pick a
+setting, pick/type a value, done). Or non-interactively:
+
+```bash
+manga-cli config get              # list every setting + current value
+manga-cli config set zoom 0.9     # change one (validated)
+manga-cli config edit             # open config.json in $EDITOR
+manga-cli config path             # print the config file path
+```
+
+Under the hood it's `~/.config/manga-cli/config.json` (XDG-aware; `$XDG_CONFIG_HOME`
+respected):
 
 ```json
 {
   "source": "atsumaru",
-  "fallback": ["weebcentral", "mangadex", "mangadot"],
+  "fallback": ["weebcentral", "mangakatana", "mangadex"],
   "readerMode": "auto",
   "direction": "rtl",
   "dualPage": false,
@@ -294,11 +374,13 @@ with `readerMode` in the config if you like.
   "showBanner": true,
   "adult": false,
   "fzfArgs": "",
-  "downloadDir": "~/Downloads/manga-cli/"
+  "downloadDir": "~/Downloads/manga-cli/",
+  "malClientId": "",
+  "malClientSecret": ""
 }
 ```
 
-- `source`: primary backend — `"atsumaru"` · `"weebcentral"` · `"mangadex"`
+- `source`: primary backend — `"atsumaru"` · `"weebcentral"` · `"mangakatana"` · `"mangadex"`
 - `fallback`: ordered backups tried when the primary fails (see [Sources](#sources))
 - `readerMode`: `"auto"` (detect) · `"kitty"` · `"iterm2"` · `"chafa"`
 - `direction`: `"rtl"` (manga) · `"ltr"` (comics/webtoons)
@@ -320,9 +402,9 @@ with `readerMode` in the config if you like.
 
 ```
 src/
-├── api/        HTTP client, source registry + fallback, sources/ (atsumaru, weebcentral, mangadex) + endpoints.md
+├── api/        HTTP client, source registry + fallback, sources/ (atsumaru, weebcentral, mangakatana, mangadex) + endpoints.md
 ├── ui/         banner, fzf menu, reader (page + webtoon), spinner, terminal detection
-├── utils/      config, cache, history, follows, library, stats, image, download, nyaa, vpn, paths
+├── utils/      config, cache, history, follows, library, stats, health, mal, image, download, nyaa, vpn, paths
 └── index.ts    CLI parsing + flows
 ```
 

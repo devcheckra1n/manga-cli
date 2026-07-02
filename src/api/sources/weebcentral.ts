@@ -90,7 +90,7 @@ export const weebcentral: Source = {
   async filters(): Promise<Filters> {
     return { genres: [], tags: [], types: [], statuses: [] };
   },
-  async browseGenre(): Promise<SearchResult[]> {
+  async browse(): Promise<SearchResult[]> {
     return [];
   },
 

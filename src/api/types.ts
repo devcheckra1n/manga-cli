@@ -2,7 +2,7 @@
 // See ./endpoints.md for the reverse-engineered Atsumaru endpoint reference.
 
 /** Which backend a manga came from (so info/chapters/pages route back to it). */
-export type SourceId = "atsumaru" | "mangadex" | "weebcentral" | "mangadot";
+export type SourceId = "atsumaru" | "mangadex" | "weebcentral" | "mangakatana";
 
 /** A manga as returned by search. */
 export interface SearchResult {
@@ -101,6 +101,17 @@ export type DiscoveryKind =
   | "topRated"
   | "mostBookmarked";
 
+/** Abstract sort order for filtered browsing (each source maps it). */
+export type BrowseSort = "popular" | "latest" | "rating" | "alphabetical";
+
+/** A filtered-browse query. Genre/status ids come from `Source.filters()`. */
+export interface BrowseFilter {
+  genreId?: string;
+  status?: string;
+  sort?: BrowseSort;
+  adult?: boolean;
+}
+
 /** A content backend. Every read operation routes through one of these. */
 export interface Source {
   readonly id: SourceId;
@@ -110,7 +121,7 @@ export interface Source {
   search(query: string, opts: { adult?: boolean; page?: number }): Promise<SearchResult[]>;
   discovery(kind: DiscoveryKind, page: number, adult: boolean): Promise<DiscoveryItem[]>;
   filters(): Promise<Filters>;
-  browseGenre(genreId: string, adult: boolean): Promise<SearchResult[]>;
+  browse(filter: BrowseFilter): Promise<SearchResult[]>;
   info(mangaId: string): Promise<MangaInfo>;
   pages(mangaId: string, chapterId: string): Promise<ReadChapter>;
   related(mangaId: string, page: number, adult: boolean): Promise<DiscoveryItem[]>;

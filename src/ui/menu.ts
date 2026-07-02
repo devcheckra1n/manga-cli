@@ -23,7 +23,8 @@ export interface PickOpts {
 const FZF_COLORS =
   "fg:-1,bg:-1,hl:#a78bfa,fg+:#ffffff,bg+:#262335,hl+:#22d3ee," +
   "info:#6b7280,prompt:#a78bfa,pointer:#22d3ee,marker:#f472b6,spinner:#a78bfa," +
-  "header:#6b7280,border:#3b3b54,gutter:-1";
+  "header:#6b7280,border:#3b3b54,gutter:-1,label:#a78bfa," +
+  "separator:#3b3b54,scrollbar:#3b3b54,preview-border:#3b3b54";
 
 // Preview pane renders covers as chafa symbols (universally safe inside fzf).
 const PREVIEW_TEMPLATE = `#!/usr/bin/env bash
@@ -83,13 +84,26 @@ async function runFzf<T extends PickItem>(
     "--layout",
     "reverse",
     "--info",
-    "inline",
+    "inline-right",
     "--cycle",
     "--no-mouse",
+    "--border",
+    "rounded",
+    "--border-label",
+    " 漫画 manga-cli ",
+    "--border-label-pos",
+    "3",
+    "--highlight-line",
+    "--ellipsis",
+    "…",
+    "--scrollbar",
+    "▐",
+    "--separator",
+    "─",
     "--prompt",
     opts.prompt ?? "❯ ",
     "--pointer",
-    "▶",
+    "▌",
     "--marker",
     "✓",
     "--color",

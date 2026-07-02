@@ -6,7 +6,9 @@
 import { atsumaru } from "./sources/atsumaru.ts";
 import { mangadex } from "./sources/mangadex.ts";
 import { weebcentral } from "./sources/weebcentral.ts";
+import { mangakatana } from "./sources/mangakatana.ts";
 import { ApiError } from "./client.ts";
+import { downSources, markDown, markUp, hasInternet } from "../utils/health.ts";
 import type {
   DiscoveryItem,
   DiscoveryKind,
@@ -16,39 +18,17 @@ import type {
   SourceId,
 } from "./types.ts";
 
-// A placeholder for a source that isn't usable yet (not implemented or blocked).
-// Registered so the chain can name it and fall through cleanly.
-function stubSource(id: SourceId, label: string, reason: string): Source {
-  const fail = async (): Promise<never> => {
-    throw new ApiError(`${label} is unavailable — ${reason}`);
-  };
-  return {
-    id,
-    label,
-    available: false,
-    search: fail,
-    discovery: fail,
-    filters: fail,
-    browseGenre: fail,
-    info: fail,
-    pages: fail,
-    related: async () => [],
-  };
-}
-
-const mangadot = stubSource("mangadot", "MangaDot (mangadot.net)", "its SPA API isn't mapped yet");
-
-export const SOURCES: Record<SourceId, Source> = { atsumaru, mangadex, weebcentral, mangadot };
+export const SOURCES: Record<SourceId, Source> = { atsumaru, weebcentral, mangakatana, mangadex };
 
 export function allSources(): Source[] {
-  return [atsumaru, mangadex, weebcentral, mangadot];
+  return [atsumaru, weebcentral, mangakatana, mangadex];
 }
 export function isSourceId(s: string): s is SourceId {
   return s in SOURCES;
 }
 
 let primary: SourceId = "atsumaru";
-let fallbacks: SourceId[] = ["mangadex"];
+let fallbacks: SourceId[] = ["weebcentral", "mangakatana", "mangadex"];
 
 export function configureSources(primaryId: SourceId, fallbackIds: SourceId[]): void {
   primary = primaryId;
@@ -97,25 +77,41 @@ export interface SourceResult<T> {
   source: SourceId;
 }
 
+// Chain ordered so healthy sources are tried first and any in their failure
+// cooldown come last (still tried, but only as a last resort).
+async function liveOrderedChain(): Promise<SourceId[]> {
+  const down = await downSources();
+  const ids = chain().filter((id) => SOURCES[id].available);
+  return [...ids.filter((id) => !down.has(id)), ...ids.filter((id) => down.has(id))];
+}
+
+/** When every source failed, blame the right thing: their servers or the user's wifi. */
+async function chainError(lastErr: unknown): Promise<Error> {
+  if (!(await hasInternet())) {
+    return new ApiError("your internet connection looks down — nothing was marked unhealthy; retry when you're back online");
+  }
+  return lastErr instanceof Error ? lastErr : new ApiError(String(lastErr));
+}
+
 /** Search across the chain; returns the first source with results. */
 export async function searchAny(
   query: string,
   opts: { adult?: boolean; page?: number },
 ): Promise<SourceResult<SearchResult>> {
   let lastErr: unknown;
-  for (const id of chain()) {
-    const s = SOURCES[id];
-    if (!s.available) continue;
+  for (const id of await liveOrderedChain()) {
     try {
-      const items = await s.search(query, opts);
+      const items = await SOURCES[id].search(query, opts);
+      await markUp(id);
       if (items.length > 0) return { items: tag(items, id), source: id };
       note(`${id}: no results, trying next`);
     } catch (e) {
       lastErr = e;
-      note(`${id} failed: ${e instanceof Error ? e.message : e}`);
+      if (!(await markDown(id))) note(`${id}: failure not recorded (connection looks offline)`);
+      else note(`${id} failed: ${e instanceof Error ? e.message : e}`);
     }
   }
-  if (lastErr) throw lastErr;
+  if (lastErr) throw await chainError(lastErr);
   return { items: [], source: primary };
 }
 
@@ -126,34 +122,34 @@ export async function discoveryAny(
   adult: boolean,
 ): Promise<SourceResult<DiscoveryItem>> {
   let lastErr: unknown;
-  for (const id of chain()) {
-    const s = SOURCES[id];
-    if (!s.available) continue;
+  for (const id of await liveOrderedChain()) {
     try {
-      const items = await s.discovery(kind, page, adult);
+      const items = await SOURCES[id].discovery(kind, page, adult);
+      await markUp(id);
       if (items.length > 0) return { items: tag(items, id), source: id };
     } catch (e) {
       lastErr = e;
-      note(`${id} discovery failed: ${e instanceof Error ? e.message : e}`);
+      if (!(await markDown(id))) note(`${id}: failure not recorded (connection looks offline)`);
+      else note(`${id} discovery failed: ${e instanceof Error ? e.message : e}`);
     }
   }
-  if (lastErr) throw lastErr;
+  if (lastErr) throw await chainError(lastErr);
   return { items: [], source: primary };
 }
 
 /** Genre filters from the first working source (genre ids are source-specific). */
 export async function filtersAny(): Promise<SourceResult<Filters["genres"][number]> & { filters: Filters }> {
   let lastErr: unknown;
-  for (const id of chain()) {
-    const s = SOURCES[id];
-    if (!s.available) continue;
+  for (const id of await liveOrderedChain()) {
     try {
-      const filters = await s.filters();
+      const filters = await SOURCES[id].filters();
+      await markUp(id);
       if (filters.genres.length > 0) return { items: filters.genres, filters, source: id };
     } catch (e) {
       lastErr = e;
-      note(`${id} filters failed: ${e instanceof Error ? e.message : e}`);
+      if (!(await markDown(id))) note(`${id}: failure not recorded (connection looks offline)`);
+      else note(`${id} filters failed: ${e instanceof Error ? e.message : e}`);
     }
   }
-  throw lastErr ?? new ApiError("No source could provide genres.");
+  throw await chainError(lastErr ?? new ApiError("No source could provide genres."));
 }

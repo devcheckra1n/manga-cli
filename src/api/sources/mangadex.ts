@@ -5,6 +5,7 @@ import { httpJson } from "../client.ts";
 import { readCache, writeCache } from "../../utils/cache.ts";
 import { MANGA_CACHE, SEARCH_CACHE, CHAPTERS_CACHE } from "../../utils/paths.ts";
 import type {
+  BrowseSort,
   DiscoveryItem,
   DiscoveryKind,
   Filters,
@@ -201,16 +202,35 @@ export const mangadex: Source = {
       .filter((t) => t.attributes.group === "genre" || t.attributes.group === "theme")
       .map((t) => ({ id: t.id, name: t.attributes.name.en ?? Object.values(t.attributes.name)[0] }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    const filters: Filters = { genres, tags: [], types: [], statuses: [] };
+    const filters: Filters = {
+      genres,
+      tags: [],
+      types: [],
+      statuses: [
+        { id: "ongoing", name: "Ongoing" },
+        { id: "completed", name: "Completed" },
+        { id: "hiatus", name: "Hiatus" },
+        { id: "cancelled", name: "Cancelled" },
+      ],
+    };
     await writeCache(MANGA_CACHE, key, filters);
     return filters;
   },
 
-  async browseGenre(genreId, adult): Promise<SearchResult[]> {
+  async browse(f): Promise<SearchResult[]> {
+    const order: Record<BrowseSort, [string, string]> = {
+      popular: ["order[followedCount]", "desc"],
+      latest: ["order[latestUploadedChapter]", "desc"],
+      rating: ["order[rating]", "desc"],
+      alphabetical: ["order[title]", "asc"],
+    };
+    const [orderKey, dir] = order[f.sort ?? "popular"];
     return listManga({
-      "includedTags[]": [genreId],
-      "contentRating[]": ratings(adult),
-      "order[followedCount]": "desc",
+      "includedTags[]": f.genreId ? [f.genreId] : undefined,
+      "status[]": f.status ? [f.status] : undefined,
+      "contentRating[]": ratings(f.adult ?? false),
+      hasAvailableChapters: "true",
+      [orderKey]: dir,
     });
   },
 
