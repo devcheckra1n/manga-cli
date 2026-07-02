@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/api"
+	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/ui"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/util"
 )
 
@@ -123,6 +124,54 @@ func cmdSearch(query string, cfg util.Config) {
 	if err != nil {
 		fail(err)
 	}
+	if len(results) == 0 {
+		fmt.Printf("No results for “%s”.\n", query)
+		return
+	}
+	// Interactive: pick a manga, then a chapter (the reader lands in phase 3).
+	if ui.IsTTY() {
+		items := make([]ui.PickItem, len(results))
+		for i, r := range results {
+			items[i] = ui.PickItem{Label: searchLabel(r)}
+		}
+		idx, err := ui.Pick(items, ui.PickOpts{
+			Prompt: "manga ❯ ",
+			Header: fmt.Sprintf("%d results for “%s” · via %s", len(results), query, source),
+		})
+		if err != nil {
+			fail(err)
+		}
+		if idx < 0 {
+			return
+		}
+		r := results[idx]
+		info, err := api.Get(r.Source).Info(r.ID)
+		if err != nil {
+			fail(err)
+		}
+		if len(info.Chapters) == 0 {
+			fmt.Println("No readable chapters for this title.")
+			return
+		}
+		chItems := make([]ui.PickItem, len(info.Chapters))
+		for i, ch := range info.Chapters {
+			chItems[len(info.Chapters)-1-i] = ui.PickItem{Label: chapterLabel(ch)} // newest first
+		}
+		cidx, err := ui.Pick(chItems, ui.PickOpts{
+			Prompt: "chapter ❯ ",
+			Header: fmt.Sprintf("%s — %d chapters", info.Title, len(info.Chapters)),
+		})
+		if err != nil {
+			fail(err)
+		}
+		if cidx < 0 {
+			return
+		}
+		ch := info.Chapters[len(info.Chapters)-1-cidx]
+		fmt.Printf("picked %s · Ch.%v %s\n", info.Title, ch.Number, ui.Dim("(the reader arrives in phase 3)"))
+		return
+	}
+	// Headless: plain listing.
 	fmt.Printf("%d results via %s\n", len(results), source)
 	for _, r := range results {
 		meta := r.Type
@@ -137,6 +186,54 @@ func cmdSearch(query string, cfg util.Config) {
 		}
 		fmt.Printf("  %-46s %s  [%s]\n", r.Title, meta, r.ID)
 	}
+}
+
+// searchLabel styles a result row: status dots ● ongoing · ◆ completed etc.
+func searchLabel(r api.SearchResult) string {
+	parts := []string{ui.Bold(r.Title)}
+	if r.IsAdult {
+		parts[0] += ui.Pink(" 18+")
+	}
+	meta := []string{}
+	if r.Type != "" {
+		meta = append(meta, ui.Dim(r.Type))
+	}
+	if r.Status != "" {
+		meta = append(meta, statusBadge(r.Status))
+	}
+	if r.Year > 0 {
+		meta = append(meta, ui.Dim(fmt.Sprintf("%d", r.Year)))
+	}
+	if r.Rating > 0 {
+		meta = append(meta, ui.Yellow(fmt.Sprintf("★%.1f", r.Rating)))
+	}
+	return parts[0] + "   " + strings.Join(meta, ui.Dim(" · "))
+}
+
+func statusBadge(status string) string {
+	s := strings.ToLower(status)
+	switch {
+	case strings.Contains(s, "ongoing"), strings.Contains(s, "releasing"), strings.Contains(s, "publishing"):
+		return ui.Green("● " + status)
+	case strings.Contains(s, "complete"), strings.Contains(s, "finished"):
+		return ui.Cyan("◆ " + status)
+	case strings.Contains(s, "hiatus"):
+		return ui.Yellow("◑ " + status)
+	case strings.Contains(s, "cancel"), strings.Contains(s, "dropped"):
+		return ui.Red("✕ " + status)
+	}
+	return ui.Dim(status)
+}
+
+func chapterLabel(ch api.Chapter) string {
+	label := ui.Bold(ui.Cyan(fmt.Sprintf("Ch.%v", ch.Number)))
+	if ch.Title != "" && ch.Title != fmt.Sprintf("Chapter %v", ch.Number) {
+		label += ui.Gray(" · " + ch.Title)
+	}
+	if ch.PageCount > 0 {
+		label += ui.Dim(fmt.Sprintf("   %dp", ch.PageCount))
+	}
+	return label
 }
 
 func cmdInfo(source api.SourceID, mangaID string) {
