@@ -278,18 +278,31 @@ Torrenting exposes your IP to peers — keep your VPN on. Requires `aria2c`
 
 ## 🕹️ MANGAVANIA (the minigame)
 
-Ridge Racer had Galaxian on its loading screen; manga-cli has **MANGAVANIA** — a tiny
-Castlevania-flavored arena brawler, rendered in pure ANSI, needing **zero internet**:
+Ridge Racer had Galaxian on its loading screen; manga-cli has **MANGAVANIA** — a full
+Castlevania-flavored campaign, rendered in pure ANSI, needing **zero internet**:
 
 ```bash
 manga-cli game     # also: play · zombies — or pick 🕹️ from the main menu
 ```
 
-`←` `→` move · `space` jump · `x` attack. Zombies take **3 hits** and crumble into bone
-piles that litter the arena. Slay 8 and the **GRAVELORD** rises (with a health bar and a
-nasty lunge) — cut him down for the win screen. 3 hearts, no continues, `r` to retry.
-When a command fails because *your* connection is down, manga-cli will help you cope by
-suggesting it.
+`←` `→` move · `space` jump · `x` attack — with a **chapter select** (I–V) so you can
+start anywhere. **Five chapters**: the Graveyard, the Crypt, the Ramparts, the
+Cathedral… and **Castle Dracula**, reached by a cutscene walk up the castle steps.
+
+- **Zombie variants** — shambling walkers, fast runners, armored **brutes**, and
+  acid-spitting **spitters**; all crumble into bone piles that litter the arena
+- **Drops** — hearts, swift boots, double damage, invincibility stars… and better
+  weapons: the long-reach **VAMPIRE KILLER** whip and the heavy **claymore**
+- **A boss per chapter** — the lunging GRAVELORD, cleaver-throwing BUTCHER,
+  teleporting BONE WITCH, and THE REAPER with his scythe sweeps — each with a
+  **Persona-style death dialogue** (close-up portrait and all)
+- **The finale**: **ALUCARD** duels you with dash-steps and sword waves — and when he
+  falls, he *becomes* **DRACULA**: triple fireballs, mini-zombie summons, and
+  **shapeshifting** (bat swoops you can only jump-slash; untouchable mist)
+
+5 hearts, retry per chapter, and the win screen tells you your clear time. When a
+command fails because *your* connection is down, manga-cli suggests the game to help
+you cope.
 
 ## Long-strip (webtoon) mode
 
