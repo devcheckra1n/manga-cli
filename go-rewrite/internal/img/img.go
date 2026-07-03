@@ -63,26 +63,33 @@ func trueColor() bool {
 		strings.Contains(os.Getenv("TERM"), "kitty") || strings.Contains(os.Getenv("TERM"), "ghostty")
 }
 
-// FitCells computes the cell rectangle (cols, rows) that fits an image of
-// w×h pixels inside maxCols×maxRows cells, preserving aspect. A terminal
-// cell is ~half as wide as it is tall, so a cell counts as 1×2 pixels.
-func FitCells(w, h, maxCols, maxRows int) (int, int) {
+// FitCells computes the cell rectangle (cols, rows) that shows a w×h-pixel
+// image inside maxCols×maxRows cells without distortion. `aspect` is the
+// terminal cell's height/width pixel ratio (from CellAspect) — using the real
+// ratio is what keeps pages from stretching.
+func FitCells(w, h, maxCols, maxRows int, aspect float64) (int, int) {
 	if w <= 0 || h <= 0 || maxCols <= 0 || maxRows <= 0 {
 		return 1, 1
 	}
-	// image aspect in cell units: cols = k*w, rows = k*h/2
-	scale := float64(maxCols) / float64(w)
-	if s := float64(maxRows*2) / float64(h); s < scale {
-		scale = s
+	if aspect <= 0 {
+		aspect = 2.0
 	}
-	cols := max(1, int(float64(w)*scale))
-	rows := max(1, int(float64(h)*scale/2))
-	return min(cols, maxCols), min(rows, maxRows)
+	// On screen: width = cols·cw, height = rows·(cw·aspect). No distortion ⇔
+	// cols/rows = (w/h)·aspect.
+	ratio := float64(w) / float64(h) * aspect
+	cols := float64(maxCols)
+	rows := cols / ratio
+	if rows > float64(maxRows) {
+		rows = float64(maxRows)
+		cols = rows * ratio
+	}
+	return max(1, min(int(cols), maxCols)), max(1, min(int(rows), maxRows))
 }
 
 func scaleTo(src image.Image, w, h int) *image.RGBA {
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	draw.ApproxBiLinear.Scale(dst, dst.Bounds(), src, src.Bounds(), draw.Src, nil)
+	// CatmullRom: proper filtering at heavy downscale (manga page → cells).
+	draw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), draw.Src, nil)
 	return dst
 }
 

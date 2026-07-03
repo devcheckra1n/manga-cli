@@ -1,26 +1,178 @@
-// manga-cli (Go) — the zero-dependency rewrite. Phase 1: core + sources.
-// The full UX (picker, reader, menu, game) lands in later phases; this binary
-// currently exposes headless commands used to verify the source layer.
+// manga-cli (Go) — the zero-dependency rewrite. Bare invocation opens the
+// main menu; the reader's `m` key returns there from anywhere.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/api"
-	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/img"
-	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/reader"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/ui"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/util"
 )
 
 const version = "2.0.0-dev"
 
-func main() {
-	cfg := util.LoadConfig()
+func execLookPath(name string) (string, error) { return exec.LookPath(name) }
 
-	// Configure the source chain from config (same semantics as the TS version).
+type cliArgs struct {
+	command  string
+	query    string
+	source   string
+	adult    bool
+	noBanner bool
+	dual     *bool
+	dir      string // rtl | ltr
+}
+
+func parseArgs(argv []string) cliArgs {
+	a := cliArgs{command: "menu"}
+	var positional []string
+	for i := 0; i < len(argv); i++ {
+		s := argv[i]
+		next := func() string {
+			if i+1 < len(argv) {
+				i++
+				return argv[i]
+			}
+			return ""
+		}
+		switch s {
+		case "-h", "--help", "help":
+			a.command = "help"
+		case "-v", "--version", "version":
+			a.command = "version"
+		case "-s", "--search":
+			a.command, a.query = "search", next()
+		case "-c", "--continue":
+			a.command = "continue"
+		case "-H", "--history":
+			a.command = "history"
+		case "-t", "--trending":
+			a.command = "trending"
+		case "-p", "--popular":
+			a.command = "popular"
+		case "-l", "--latest":
+			a.command = "latest"
+		case "-R", "--random":
+			a.command = "random"
+		case "-r", "--recommended", "--recommend":
+			a.command = "recommended"
+		case "-g", "--genre":
+			a.command, a.query = "genre", next()
+		case "--follow":
+			a.command = "follow"
+		case "-u", "--updates":
+			a.command = "updates"
+		case "--stats":
+			a.command = "stats"
+		case "-S", "--source":
+			a.source = next()
+		case "--adult":
+			a.adult = true
+		case "--no-banner":
+			a.noBanner = true
+		case "--rtl":
+			a.dir = "rtl"
+		case "--ltr":
+			a.dir = "ltr"
+		case "--dual", "--spread":
+			t := true
+			a.dual = &t
+		case "--single":
+			f := false
+			a.dual = &f
+		case "--debug":
+			os.Setenv("MANGA_CLI_DEBUG", "1")
+		default:
+			if !strings.HasPrefix(s, "-") {
+				positional = append(positional, s)
+			}
+		}
+	}
+	if len(positional) > 0 && a.command == "menu" {
+		first := strings.ToLower(positional[0])
+		rest := strings.Join(positional[1:], " ")
+		switch first {
+		case "search":
+			a.command, a.query = "search", rest
+		case "continue":
+			a.command = "continue"
+		case "history":
+			a.command = "history"
+		case "trending":
+			a.command = "trending"
+		case "popular":
+			a.command = "popular"
+		case "latest":
+			a.command = "latest"
+		case "random", "roll":
+			a.command = "random"
+		case "recommended", "recs":
+			a.command, a.query = "recommended", rest
+		case "genre":
+			a.command, a.query = "genre", rest
+		case "browse", "filter":
+			a.command = "browse"
+		case "follow":
+			a.command, a.query = "follow", rest
+		case "updates", "u":
+			a.command = "updates"
+		case "stats":
+			a.command = "stats"
+		case "sources", "source":
+			a.command, a.query = "sources", rest
+		case "where", "paths":
+			a.command = "where"
+		case "mal", "myanimelist":
+			a.command, a.query = "mal", rest
+		case "config", "settings":
+			a.command, a.query = "config", rest
+		case "menu":
+			a.command = "menu"
+		case "info": // debug helpers from phase 1
+			a.command, a.query = "info", rest
+		case "pages":
+			a.command, a.query = "pages", rest
+		default:
+			a.command, a.query = "search", strings.Join(positional, " ")
+		}
+	} else if len(positional) > 0 && a.query == "" {
+		a.query = strings.Join(positional, " ")
+	}
+	return a
+}
+
+func main() {
+	// Restore the terminal on Ctrl-C / SIGTERM even mid-reader.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		ui.Restore()
+		os.Exit(130)
+	}()
+
+	a := parseArgs(os.Args[1:])
+	cfg := util.LoadConfig()
+	if a.adult {
+		cfg.Adult = true
+	}
+	if a.dir != "" {
+		cfg.Direction = a.dir
+	}
+	if a.dual != nil {
+		cfg.DualPage = *a.dual
+	}
+	if a.source != "" && api.IsSourceID(a.source) {
+		cfg.Source = a.source
+	}
+
 	var fb []api.SourceID
 	for _, s := range cfg.Fallback {
 		if api.IsSourceID(s) {
@@ -31,215 +183,110 @@ func main() {
 		api.Configure(api.SourceID(cfg.Source), fb)
 	}
 
-	args := os.Args[1:]
-	if len(args) == 0 {
-		usage()
+	switch a.command {
+	case "help":
+		printHelp()
 		return
-	}
-	switch args[0] {
-	case "version", "-v", "--version":
+	case "version":
 		fmt.Println("manga-cli " + version + " (go)")
+		return
+	case "where":
+		whereCmd(cfg)
+		return
 	case "sources":
-		cmdSources(cfg)
-	case "search":
-		cmdSearch(strings.Join(args[1:], " "), cfg)
-	case "continue", "-c":
-		cmdContinue(cfg)
-	case "info":
-		need(args, 3, "info <source> <mangaId>")
-		cmdInfo(api.SourceID(args[1]), args[2])
-	case "pages":
-		need(args, 4, "pages <source> <mangaId> <chapterId>")
-		cmdPages(api.SourceID(args[1]), args[2], args[3])
+		sourcesCmd(cfg, a.query)
+		return
+	case "stats":
+		must(statsFlow())
+		return
+	case "mal":
+		must(malFlow(cfg, a.query))
+		return
+	case "config":
+		must(configFlow(&cfg, a.query))
+		return
+	case "info", "pages":
+		debugCmd(a.command, a.query)
+		return
+	}
+
+	if !a.noBanner && shouldShowBanner(cfg.ShowBanner) && a.command == "menu" {
+		fmt.Print(banner(version) + "\n")
+	}
+
+	err := func() error {
+		switch a.command {
+		case "menu":
+			return mainMenu(cfg)
+		case "search":
+			return searchFlow(cfg, a.query)
+		case "continue":
+			return continueFlow(cfg)
+		case "history":
+			return historyFlow(cfg)
+		case "trending":
+			return discoveryFlow(cfg, api.Trending, "trending")
+		case "popular":
+			return discoveryFlow(cfg, api.Popular, "popular")
+		case "latest":
+			return discoveryFlow(cfg, api.RecentlyUpdated, "latest updates")
+		case "random":
+			return randomFlow(cfg)
+		case "recommended":
+			return recommendedFlow(cfg, a.query)
+		case "genre":
+			return genreFlow(cfg, a.query)
+		case "browse":
+			return browseFlow(cfg)
+		case "follow":
+			return followFlow(cfg, a.query)
+		case "updates":
+			return updatesFlow(cfg)
+		}
+		return nil
+	}()
+	// `m` pressed deep inside a directly-launched flow → open the main menu.
+	if errors.Is(err, errMenu) {
+		err = mainMenu(cfg)
+	}
+	must(err)
+}
+
+func must(err error) {
+	if err != nil && !errors.Is(err, errMenu) {
+		ui.Restore()
+		fmt.Fprintln(os.Stderr, ui.Red("✗ "+err.Error()))
+		if strings.Contains(err.Error(), "internet connection looks down") {
+			fmt.Fprintln(os.Stderr, ui.Dim("  while you wait — the game returns in phase 6 🕹"))
+		}
+		os.Exit(1)
+	}
+}
+
+func debugCmd(cmd, query string) {
+	parts := strings.Fields(query)
+	switch {
+	case cmd == "info" && len(parts) >= 2:
+		info, err := api.Get(api.SourceID(parts[0])).Info(parts[1])
+		must(err)
+		fmt.Printf("%s (%s) — %d chapters, forceStrip=%v\n", info.Title, info.Type, len(info.Chapters), info.ForceStrip)
+	case cmd == "pages" && len(parts) >= 3:
+		rc, err := api.Get(api.SourceID(parts[0])).Pages(parts[1], parts[2])
+		must(err)
+		fmt.Printf("%d pages\n", len(rc.Pages))
 	default:
-		usage()
+		fmt.Println("usage: manga-cli info <source> <id> | pages <source> <id> <chId>")
 	}
 }
 
-func usage() {
-	fmt.Println(`manga-cli (go rewrite — phase 1)
-  search <query>                    search across the fallback chain
-  info <source> <mangaId>           chapter list for a manga
-  pages <source> <mangaId> <chId>   page URLs for a chapter
-  sources                           list sources & the chain
-  version`)
-}
+// ── labels ─────────────────────────────────────────────────────────────────────
 
-func need(args []string, n int, use string) {
-	if len(args) < n {
-		fmt.Fprintln(os.Stderr, "usage: manga-cli "+use)
-		os.Exit(2)
-	}
-}
-
-func fail(err error) {
-	ui.Restore()
-	fmt.Fprintln(os.Stderr, "✗ "+err.Error())
-	os.Exit(1)
-}
-
-// openReader runs a reader session with the config's defaults.
-func openReader(cfg util.Config, ref api.MangaRef, info *api.MangaInfo, chIdx, page int) reader.Action {
-	act, err := reader.Run(&reader.Context{
-		Manga: ref, Info: info, StartChapter: chIdx, StartPage: page,
-		Protocol:  img.DetectProtocol(cfg.ReaderMode),
-		Direction: cfg.Direction, DualPage: cfg.DualPage, Fit: cfg.Fit,
-		Zoom: cfg.Zoom, HudReserve: cfg.HudReserve, Prefetch: cfg.PrefetchPages,
-		Webtoon: info.ForceStrip,
-	})
-	if err != nil {
-		fail(err)
-	}
-	if act == reader.ActMenu {
-		fmt.Println(ui.Dim("(the main menu arrives in phase 5)"))
-	}
-	return act
-}
-
-func cmdContinue(cfg util.Config) {
-	h := util.MostRecent()
-	if h == nil {
-		fmt.Println("No reading history yet — search for something first.")
-		return
-	}
-	fmt.Printf("%s %s %s\n", ui.Dim("resuming"), ui.Bold(h.Title),
-		ui.Dim(fmt.Sprintf("— Ch.%v · p.%d", h.LastChapterNumber, h.LastPage+1)))
-	src := api.SourceID(h.Source)
-	info, err := api.Get(src).Info(h.ID)
-	if err != nil {
-		fail(err)
-	}
-	ref := api.MangaRef{ID: h.ID, Title: h.Title, Poster: h.CoverURL, Source: src}
-	openReader(cfg, ref, info, h.LastChapterIndex, h.LastPage)
-}
-
-func cmdSources(cfg util.Config) {
-	down := api.DownSources()
-	for _, s := range api.AllSources() {
-		mark := "○"
-		notes := ""
-		if s.ID() == api.PrimaryID() {
-			mark = "●"
-			notes = "  primary"
-		}
-		if down[s.ID()] {
-			mark = "◌"
-			notes = "  cooling down"
-		}
-		fmt.Printf("  %s %-12s %s%s\n", mark, s.ID(), s.Label(), notes)
-	}
-	chain := []string{cfg.Source}
-	for _, f := range cfg.Fallback {
-		if f != cfg.Source {
-			chain = append(chain, f)
-		}
-	}
-	fmt.Println("\n  fallback chain: " + strings.Join(chain, " → "))
-}
-
-func cmdSearch(query string, cfg util.Config) {
-	if strings.TrimSpace(query) == "" {
-		fmt.Fprintln(os.Stderr, "usage: manga-cli search [@source] <query>")
-		os.Exit(2)
-	}
-	var results []api.SearchResult
-	var source api.SourceID
-	var err error
-	// "search @weebcentral berserk" pins one source (debugging aid).
-	if strings.HasPrefix(query, "@") {
-		parts := strings.SplitN(query, " ", 2)
-		if len(parts) == 2 && api.IsSourceID(parts[0][1:]) {
-			source = api.SourceID(parts[0][1:])
-			results, err = api.Get(source).Search(parts[1], api.SearchOpts{Adult: cfg.Adult})
-			for i := range results {
-				results[i].Source = source
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "unknown source in @pin")
-			os.Exit(2)
-		}
-	} else {
-		results, source, err = api.SearchAny(query, api.SearchOpts{Adult: cfg.Adult})
-	}
-	if err != nil {
-		fail(err)
-	}
-	if len(results) == 0 {
-		fmt.Printf("No results for “%s”.\n", query)
-		return
-	}
-	// Interactive: pick a manga, then a chapter (the reader lands in phase 3).
-	if ui.IsTTY() {
-		items := make([]ui.PickItem, len(results))
-		for i, r := range results {
-			items[i] = ui.PickItem{Label: searchLabel(r)}
-		}
-		idx, err := ui.Pick(items, ui.PickOpts{
-			Prompt: "manga ❯ ",
-			Header: fmt.Sprintf("%d results for “%s” · via %s", len(results), query, source),
-		})
-		if err != nil {
-			fail(err)
-		}
-		if idx < 0 {
-			return
-		}
-		r := results[idx]
-		info, err := api.Get(r.Source).Info(r.ID)
-		if err != nil {
-			fail(err)
-		}
-		if len(info.Chapters) == 0 {
-			fmt.Println("No readable chapters for this title.")
-			return
-		}
-		chItems := make([]ui.PickItem, len(info.Chapters))
-		for i, ch := range info.Chapters {
-			chItems[len(info.Chapters)-1-i] = ui.PickItem{Label: chapterLabel(ch)} // newest first
-		}
-		// Chapter-pick → read loop ("j" in the reader returns here).
-		for {
-			cidx, err := ui.Pick(chItems, ui.PickOpts{
-				Prompt: "chapter ❯ ",
-				Header: fmt.Sprintf("%s — %d chapters", info.Title, len(info.Chapters)),
-			})
-			if err != nil {
-				fail(err)
-			}
-			if cidx < 0 {
-				return
-			}
-			act := openReader(cfg, api.MangaRef{ID: r.ID, Title: info.Title, Poster: r.Poster, Source: r.Source},
-				info, len(info.Chapters)-1-cidx, 0)
-			if act != reader.ActJump {
-				return
-			}
-		}
-	}
-	// Headless: plain listing.
-	fmt.Printf("%d results via %s\n", len(results), source)
-	for _, r := range results {
-		meta := r.Type
-		if r.Status != "" {
-			meta += " · " + r.Status
-		}
-		if r.Year > 0 {
-			meta += fmt.Sprintf(" · %d", r.Year)
-		}
-		if r.Rating > 0 {
-			meta += fmt.Sprintf(" · ★%.1f", r.Rating)
-		}
-		fmt.Printf("  %-46s %s  [%s]\n", r.Title, meta, r.ID)
-	}
-}
-
-// searchLabel styles a result row: status dots ● ongoing · ◆ completed etc.
 func searchLabel(r api.SearchResult) string {
-	parts := []string{ui.Bold(r.Title)}
+	label := ui.Bold(r.Title)
 	if r.IsAdult {
-		parts[0] += ui.Pink(" 18+")
+		label += ui.Pink(" 18+")
 	}
-	meta := []string{}
+	var meta []string
 	if r.Type != "" {
 		meta = append(meta, ui.Dim(r.Type))
 	}
@@ -252,7 +299,7 @@ func searchLabel(r api.SearchResult) string {
 	if r.Rating > 0 {
 		meta = append(meta, ui.Yellow(fmt.Sprintf("★%.1f", r.Rating)))
 	}
-	return parts[0] + "   " + strings.Join(meta, ui.Dim(" · "))
+	return label + "   " + strings.Join(meta, ui.Dim(" · "))
 }
 
 func statusBadge(status string) string {
@@ -281,35 +328,56 @@ func chapterLabel(ch api.Chapter) string {
 	return label
 }
 
-func cmdInfo(source api.SourceID, mangaID string) {
-	info, err := api.Get(source).Info(mangaID)
-	if err != nil {
-		fail(err)
-	}
-	fmt.Printf("%s (%s) — %d chapters, forceStrip=%v\n", info.Title, info.Type, len(info.Chapters), info.ForceStrip)
-	n := len(info.Chapters)
-	show := info.Chapters
-	if n > 6 {
-		show = append(append([]api.Chapter{}, info.Chapters[:3]...), info.Chapters[n-3:]...)
-	}
-	for _, ch := range show {
-		fmt.Printf("  Ch.%-8v %-30s %dp  [%s]\n", ch.Number, ch.Title, ch.PageCount, ch.ID)
-	}
-}
+// ── help ───────────────────────────────────────────────────────────────────────
 
-func cmdPages(source api.SourceID, mangaID, chapterID string) {
-	rc, err := api.Get(source).Pages(mangaID, chapterID)
-	if err != nil {
-		fail(err)
-	}
-	fmt.Printf("%d pages\n", len(rc.Pages))
-	for i, p := range rc.Pages {
-		if i >= 3 && i < len(rc.Pages)-1 {
-			if i == 3 {
-				fmt.Println("  …")
-			}
-			continue
-		}
-		fmt.Printf("  p%-3d %s\n", p.Number+1, p.URL)
-	}
+func printHelp() {
+	b, k, d := ui.Bold, ui.Cyan, ui.Dim
+	fmt.Println(banner(version) + `
+` + b("USAGE") + `
+  manga-cli                ` + d("# no args → interactive main menu") + `
+  manga-cli [flags] [query]
+
+` + b("COMMANDS / FLAGS") + `
+  ` + k("-s, --search") + ` <query>   search and pick a manga
+  ` + k("-R, --random") + `           🎲 roll a random manga and start reading
+  ` + k("-c, --continue") + `         resume your last-read manga
+  ` + k("-H, --history") + `          browse reading history
+  ` + k("-t, --trending") + `         show trending manga
+  ` + k("-p, --popular") + `          show popular manga
+  ` + k("-l, --latest") + `           show latest updates
+  ` + k("-g, --genre") + ` <genre>    browse by genre
+  ` + k("    browse") + `             filtered browse — genre + status + sort
+  ` + k("-r, --recommended") + `      "more like this" — recommendations
+  ` + k("    --follow") + ` [query]   follow a series for new-chapter updates
+  ` + k("-u, --updates") + `          show followed series with new chapters
+  ` + k("    --stats") + `            your reading stats / wrapped
+  ` + k("-S, --source") + ` <id>      force: atsumaru · weebcentral · mangakatana · mangadex
+  ` + k("    sources") + ` [reset]    list sources & health — reset forgives failures
+  ` + k("    config") + ` [sub]       settings — interactive, or get · set · edit · path
+  ` + k("    mal") + ` [sub]          MyAnimeList tracking: login · status · logout
+  ` + k("    where") + `              paths, setup & renderer info
+  ` + k("    --dual / --single") + `  spread mode on/off · ` + k("--rtl / --ltr") + ` direction
+  ` + k("    --adult") + `            include 18+ results for this run
+  ` + k("-v, --version") + ` · ` + k("-h, --help") + `
+
+` + b("READER KEYS") + `
+  ` + k("→ ←") + `            turn page (direction-aware: in rtl, ← advances)
+  ` + k("n / p") + `          next / previous page · ` + k("space") + ` next
+  ` + k("] / [") + `          next / previous chapter
+  ` + k("g / G") + `          first / last page · ` + k(": or #") + ` go to page
+  ` + k("w") + `              toggle long-strip (webtoon) scroll
+  ` + k("d") + `              toggle dual-page spread
+  ` + k("t") + `              toggle reading direction (rtl ⇄ ltr)
+  ` + k("f") + `              toggle fit · ` + k("+ / - / 0") + ` zoom
+  ` + k("b") + `              follow / unfollow this series
+  ` + k("s") + `              save current page to your downloads
+  ` + k("j") + `              back to the chapter list
+  ` + k("m") + `              back to the main menu (works from any read)
+  ` + k("?") + `              in-reader help · ` + k("q / esc") + ` quit
+
+` + b("ZERO DEPENDENCIES") + `  ` + d("this binary needs nothing installed — no fzf, no chafa.") + `
+  ` + d("Images render via the built-in pipeline: kitty/iTerm2 protocols on") + `
+  ` + d("capable terminals, truecolor half-blocks everywhere else (256-color fallback).") + `
+
+` + b("COMING SOON") + `  ` + d("downloads (CBZ/ZIP/PDF) · offline library · sync · nyaa · MANGAVANIA") + ``)
 }

@@ -32,6 +32,8 @@ type Context struct {
 	Prefetch     int
 	Webtoon      bool
 	NoHistory    bool
+	NoFollow     bool
+	DownloadDir  string
 	// LoadChapter overrides page loading (offline library). Nil = via source.
 	LoadChapter func(idx int) (*api.ReadChapter, error)
 }
@@ -96,6 +98,14 @@ type session struct {
 	gotoBuf   string
 	gotoMode  bool
 	lastFlash string
+	cellAsp   float64 // terminal cell h/w pixel ratio (anti-stretch)
+}
+
+func (r *session) aspect() float64 {
+	if r.cellAsp == 0 {
+		r.cellAsp = img.CellAspect()
+	}
+	return r.cellAsp
 }
 
 func (r *session) loadChapter(idx int) error {
@@ -192,7 +202,7 @@ func (r *session) paintImage(path string, left, top, maxCols, maxRows int) bool 
 		return false
 	}
 	b := im.Bounds()
-	cols, rows := img.FitCells(b.Dx(), b.Dy(), maxCols, maxRows)
+	cols, rows := img.FitCells(b.Dx(), b.Dy(), maxCols, maxRows, r.aspect())
 	x := left + max(0, (maxCols-cols)/2)
 	y := top + max(0, (maxRows-rows)/2)
 
@@ -277,7 +287,8 @@ func (r *session) stripLines(p api.Page, width int) []string {
 		return nil
 	}
 	b := im.Bounds()
-	rows := max(1, b.Dy()*width/max(1, b.Dx())/2)
+	// Strip rows follow the real cell aspect so long strips aren't stretched.
+	rows := max(1, int(float64(b.Dy())*float64(width)/float64(max(1, b.Dx()))/r.aspect()))
 	lines := img.RenderCells(im, width, rows)
 	if len(r.stripEls) > 8 {
 		r.stripEls = map[string][]string{}
@@ -422,6 +433,8 @@ func (r *session) drawHelp() {
 		{"t", "toggle reading direction"},
 		{"f", "toggle fit (page / width)"},
 		{"+ - 0", "zoom in / out / reset"},
+		{"b", "follow / unfollow series"},
+		{"s", "save current page"},
 		{"r", "re-render (after a resize)"},
 		{"j", "back to the chapter list"},
 		{"m", "back to the main menu"},
@@ -592,6 +605,23 @@ func (r *session) loop() (Action, error) {
 			r.zoom = 1.0
 			r.stripEls = map[string][]string{}
 			flash = "zoom 100%"
+		case key == "b":
+			if r.ctx.NoFollow {
+				flash = "following not available here"
+			} else if util.ToggleFollow(util.FollowEntry{
+				ID: r.ctx.Manga.ID, Title: r.ctx.Manga.Title, Source: string(r.ctx.Manga.Source),
+				CoverURL: r.ctx.Manga.Poster, ChapterCount: len(r.ctx.Info.Chapters),
+			}) {
+				flash = "♥ following"
+			} else {
+				flash = "unfollowed"
+			}
+		case key == "s":
+			if dest, err := r.savePage(); err == nil {
+				flash = "saved → " + dest
+			} else {
+				flash = "save failed"
+			}
 		case key == "r":
 			r.stripEls = map[string][]string{}
 		default:
@@ -690,6 +720,53 @@ func (r *session) handleGoto(key ui.Key) {
 		}
 		r.drawHud(fmt.Sprintf("go to page (1-%d): %s▏", len(r.ch.Pages), r.gotoBuf))
 	}
+}
+
+func sanitize(s string) string {
+	out := strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`/\:*?"<>|`, r) {
+			return '_'
+		}
+		return r
+	}, s)
+	if len(out) > 80 {
+		out = out[:80]
+	}
+	if strings.TrimSpace(out) == "" {
+		return "manga"
+	}
+	return strings.TrimSpace(out)
+}
+
+// savePage copies the current cached page into the downloads folder.
+func (r *session) savePage() (string, error) {
+	if r.page >= len(r.ch.Pages) {
+		return "", fmt.Errorf("no page")
+	}
+	path, err := r.pagePath(r.ch.Pages[r.page])
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	ch := r.ctx.Info.Chapters[r.chIdx]
+	dir := r.ctx.DownloadDir
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = home
+	}
+	dir = dir + string(os.PathSeparator) + sanitize(r.ctx.Manga.Title)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	ext := ".webp"
+	if i := strings.LastIndexByte(path, '.'); i > 0 {
+		ext = path[i:]
+	}
+	dest := fmt.Sprintf("%s%cch%s_p%d%s", dir, os.PathSeparator, trimNum(ch.Number), r.page+1, ext)
+	return dest, os.WriteFile(dest, data, 0o644)
 }
 
 func trimNum(f float64) string {
