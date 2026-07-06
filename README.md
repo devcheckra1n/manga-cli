@@ -18,6 +18,34 @@ across four sources with automatic fallback.
           ╚═════╝╚══════╝╚═╝
 ```
 
+## ⚡ v2.0.0 — the zero-dependency rewrite
+
+manga-cli v2 is a **single ~7MB static binary written in Go** with **zero dependencies**:
+no fzf, no chafa, no zip, no unzip, no imagemagick, no runtime. Download one file and
+read manga — on anything from a fresh macOS install to a Gentoo box running Window Maker.
+
+```bash
+# grab your platform's binary from the latest release, then:
+chmod +x manga-cli-* && mv manga-cli-* /usr/local/bin/manga-cli
+manga-cli
+```
+
+- **Built-in fuzzy picker** (replaces fzf) and a **built-in image pipeline** (replaces
+  chafa): kitty & iTerm2 graphics on capable terminals, truecolor half-blocks everywhere
+  else, 256-color fallback for ancient ones — aspect-corrected to your terminal's real
+  cell size
+- **Everything from v1**: 4 sources with connection-aware fallback, main menu, reader
+  (RTL/dual/webtoon/zoom/go-to), downloads (CBZ/ZIP/PDF/images — all in-process),
+  offline library, follows/updates/sync, MAL tracking, stats, config editor, nyaa
+  (aria2c is the one *optional* external), and the full **MANGAVANIA** campaign
+- Builds: `darwin-arm64/amd64`, `linux-amd64/arm64/386` (fully static), `windows-amd64`
+- Shares your existing config/history/follows/caches with v1
+
+The Go source lives in [`go-rewrite/`](go-rewrite/); the original Bun/TypeScript
+implementation below remains as the reference (`bun run install:bin` still works).
+
+---
+
 ## Features
 
 - 🔎 **Fuzzy search** with cover-art previews (via `fzf` + `chafa`)

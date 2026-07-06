@@ -17,7 +17,7 @@ import (
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/util"
 )
 
-const version = "2.0.0-dev"
+const version = "2.0.0"
 
 func execLookPath(name string) (string, error) { return exec.LookPath(name) }
 
