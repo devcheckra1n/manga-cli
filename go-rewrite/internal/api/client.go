@@ -22,6 +22,10 @@ const (
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
+// Image fetches get a much longer leash: a slow CDN window (atsu has them)
+// should mean a slow page, not a lost one.
+var binaryClient = &http.Client{Timeout: 45 * time.Second}
+
 func debugEnabled() bool { return os.Getenv("MANGA_CLI_DEBUG") == "1" }
 
 // APIError carries an optional HTTP status alongside the message.
@@ -141,7 +145,13 @@ func FetchBinary(rawURL string) []byte {
 	if debugEnabled() {
 		fmt.Fprintf(os.Stderr, "[api] IMG %s\n", abs)
 	}
-	res, err := doGet(abs, map[string]string{"Referer": originOf(abs)})
+	req, err := http.NewRequest(http.MethodGet, abs, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", browserUA)
+	req.Header.Set("Referer", originOf(abs))
+	res, err := binaryClient.Do(req)
 	if err != nil {
 		return nil
 	}

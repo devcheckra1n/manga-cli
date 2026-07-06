@@ -28,6 +28,7 @@ type cliArgs struct {
 	noBanner bool
 	dual     *bool
 	dir      string // rtl | ltr
+	dl       dlOpts
 }
 
 func parseArgs(argv []string) cliArgs {
@@ -71,6 +72,23 @@ func parseArgs(argv []string) cliArgs {
 			a.command = "updates"
 		case "--stats":
 			a.command = "stats"
+		case "-d", "--download":
+			a.command = "download"
+			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+				a.query = next()
+			}
+		case "-f", "--format":
+			a.dl.format = next()
+		case "--chapters", "--chapter":
+			a.dl.chapters = next()
+		case "--out", "--output":
+			a.dl.out = next()
+		case "--library", "--offline":
+			a.command = "library"
+		case "--dump":
+			a.dl.dump = next()
+		case "--no-vpn-check":
+			a.dl.noVpn = true
 		case "-S", "--source":
 			a.source = next()
 		case "--adult":
@@ -125,6 +143,14 @@ func parseArgs(argv []string) cliArgs {
 			a.command = "updates"
 		case "stats":
 			a.command = "stats"
+		case "download", "dl":
+			a.command, a.query = "download", rest
+		case "library", "offline":
+			a.command = "library"
+		case "sync":
+			a.command = "sync"
+		case "nyaa", "torrent", "magnet":
+			a.command, a.query = "nyaa", rest
 		case "sources", "source":
 			a.command, a.query = "sources", rest
 		case "where", "paths":
@@ -242,6 +268,14 @@ func main() {
 			return followFlow(cfg, a.query)
 		case "updates":
 			return updatesFlow(cfg)
+		case "download":
+			return downloadFlow(cfg, a.query, a.dl)
+		case "library":
+			return libraryFlow(cfg)
+		case "sync":
+			return syncFlow(cfg, a.dl)
+		case "nyaa":
+			return nyaaFlow(cfg, a.query, a.dl)
 		}
 		return nil
 	}()
@@ -350,6 +384,15 @@ func printHelp() {
   ` + k("-r, --recommended") + `      "more like this" — recommendations
   ` + k("    --follow") + ` [query]   follow a series for new-chapter updates
   ` + k("-u, --updates") + `          show followed series with new chapters
+  ` + k("    sync") + `               download new chapters for everything you follow
+  ` + k("-d, --download") + ` <query> download chapters (CBZ/ZIP/PDF/images)
+  ` + k("-f, --format") + ` <fmt>     cbz · zip · pdf · images
+  ` + k("    --chapters") + ` <spec>  non-interactive: 1-10 · 1,3,5 · all · latest
+  ` + k("    --out") + ` <dir>        download into <dir>
+  ` + k("    --library") + `          browse & read your downloads offline
+  ` + k("    nyaa") + ` [query]       manga torrents via nyaa.si + aria2c
+  ` + k("    --dump") + ` <type>      nyaa dump: eng · raw · non-eng · all
+  ` + k("    --no-vpn-check") + `     skip the pre-torrent VPN check
   ` + k("    --stats") + `            your reading stats / wrapped
   ` + k("-S, --source") + ` <id>      force: atsumaru · weebcentral · mangakatana · mangadex
   ` + k("    sources") + ` [reset]    list sources & health — reset forgives failures
@@ -375,9 +418,10 @@ func printHelp() {
   ` + k("m") + `              back to the main menu (works from any read)
   ` + k("?") + `              in-reader help · ` + k("q / esc") + ` quit
 
-` + b("ZERO DEPENDENCIES") + `  ` + d("this binary needs nothing installed — no fzf, no chafa.") + `
-  ` + d("Images render via the built-in pipeline: kitty/iTerm2 protocols on") + `
-  ` + d("capable terminals, truecolor half-blocks everywhere else (256-color fallback).") + `
+` + b("ZERO DEPENDENCIES") + `  ` + d("this binary needs nothing installed — no fzf, no chafa,") + `
+  ` + d("no zip, no unzip, no imagemagick. Images render via the built-in pipeline:") + `
+  ` + d("kitty/iTerm2 protocols on capable terminals, truecolor half-blocks elsewhere.") + `
+  ` + d("Only nyaa torrents want an external tool (aria2c) — and that's optional.") + `
 
-` + b("COMING SOON") + `  ` + d("downloads (CBZ/ZIP/PDF) · offline library · sync · nyaa · MANGAVANIA") + ``)
+` + b("COMING SOON") + `  ` + d("MANGAVANIA 🕹") + ``)
 }
