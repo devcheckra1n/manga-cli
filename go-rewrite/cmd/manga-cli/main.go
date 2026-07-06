@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/api"
+	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/game"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/ui"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/util"
 )
@@ -151,6 +152,8 @@ func parseArgs(argv []string) cliArgs {
 			a.command = "sync"
 		case "nyaa", "torrent", "magnet":
 			a.command, a.query = "nyaa", rest
+		case "game", "play", "zombies", "mangavania":
+			a.command = "game"
 		case "sources", "source":
 			a.command, a.query = "sources", rest
 		case "where", "paths":
@@ -234,6 +237,9 @@ func main() {
 	case "info", "pages":
 		debugCmd(a.command, a.query)
 		return
+	case "game":
+		must(game.Run())
+		return
 	}
 
 	if !a.noBanner && shouldShowBanner(cfg.ShowBanner) && a.command == "menu" {
@@ -291,7 +297,7 @@ func must(err error) {
 		ui.Restore()
 		fmt.Fprintln(os.Stderr, ui.Red("✗ "+err.Error()))
 		if strings.Contains(err.Error(), "internet connection looks down") {
-			fmt.Fprintln(os.Stderr, ui.Dim("  while you wait — the game returns in phase 6 🕹"))
+			fmt.Fprintln(os.Stderr, ui.Dim("  while you wait — slay some zombies: ")+ui.Cyan("manga-cli game")+" 🕹")
 		}
 		os.Exit(1)
 	}
@@ -423,5 +429,6 @@ func printHelp() {
   ` + d("kitty/iTerm2 protocols on capable terminals, truecolor half-blocks elsewhere.") + `
   ` + d("Only nyaa torrents want an external tool (aria2c) — and that's optional.") + `
 
-` + b("COMING SOON") + `  ` + d("MANGAVANIA 🕹") + ``)
+` + b("MANGAVANIA") + `  ` + k("manga-cli game") + `  ` + d("— five chapters of zombie-slaying, a chapter") + `
+  ` + d("select, boss dialogues, and DRACULA at the top. Needs zero internet.") + ``)
 }

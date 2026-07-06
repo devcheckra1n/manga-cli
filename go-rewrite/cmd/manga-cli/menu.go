@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/game"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/ui"
 	"github.com/devcheckra1n/manga-cli/go-rewrite/internal/util"
 )
@@ -61,6 +62,8 @@ func mainMenu(cfg util.Config) error {
 				run: func() error { return syncFlow(cfg, dlOpts{}) }, pause: true},
 			menuEntry{label: "📊  " + ui.Bold(pad("stats")) + " " + ui.Dim("your reading wrapped"),
 				run: func() error { return statsFlow() }, pause: true},
+			menuEntry{label: "🕹️  " + ui.Bold(pad("game")) + " " + ui.Dim("MANGAVANIA — slay zombies while the wifi is dead"),
+				run: func() error { return game.Run() }},
 			menuEntry{label: "🔧  " + ui.Bold(pad("config")) + " " + ui.Dim("settings editor"),
 				run: func() error { return configFlow(&cfg, "") }},
 		)
